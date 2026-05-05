@@ -155,9 +155,18 @@ export default async function expenseRoutes(fastify, options) {
   // Get all unpaid splits for the current logged-in member (for pending bills on login)
   fastify.get('/my-pending', async (request, reply) => {
     const { memberId, roomId } = request.user;
-    const { getUnpaidSplitsForMember } = await import('../db/queries/splits.js');
-    const splits = await getUnpaidSplitsForMember(memberId);
-    return reply.send({ splits });
+    const { getUnpaidSplitsForMember, getPendingVerificationSplitsForPayer } = await import('../db/queries/splits.js');
+    
+    // Get splits where current user is the debtor
+    const debtorSplits = await getUnpaidSplitsForMember(memberId);
+    
+    // Get splits where current user is the payer and payment is pending verification
+    const payerSplits = await getPendingVerificationSplitsForPayer(memberId);
+    
+    // Combine both lists
+    const allSplits = [...debtorSplits, ...payerSplits];
+    
+    return reply.send({ splits: allSplits });
   });
 
   // Payer confirms or rejects a payment claim

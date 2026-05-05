@@ -1,9 +1,9 @@
-import { createSplit, getUnpaidBalanceForMember } from '../db/queries/splits.js';
+import { createSplit, getUnpaidBalanceToSpecificPayer } from '../db/queries/splits.js';
 
 /**
  * Create splits for a new expense.
  * - Payer's split is auto-marked paid=true
- * - Each debtor's split includes their current carry-forward (unpaid balance)
+ * - Each debtor's split includes their current carry-forward (unpaid balance TO THIS PAYER ONLY)
  * - Supports 'equal' (default) or 'custom' split modes
  *
  * @param {string} expenseId
@@ -34,7 +34,8 @@ export async function createSplits(expenseId, payerId, totalAmount, memberIds, c
       });
       splits.push(split);
     } else {
-      const carryForward = await getUnpaidBalanceForMember(memberId);
+      // FIXED: Only include unpaid balance to THIS SPECIFIC PAYER, not total unpaid balance
+      const carryForward = await getUnpaidBalanceToSpecificPayer(memberId, payerId);
       const split = await createSplit({
         expenseId,
         memberId,

@@ -22,7 +22,14 @@ function getTransporter() {
 
 async function sendMail({ to, subject, html }) {
   const t = getTransporter();
-  if (!t || !to) return;
+  if (!t) return;
+  
+  // Validate email address
+  if (!to || typeof to !== 'string' || !to.includes('@') || to.length < 5) {
+    console.warn(`📧 Skipping email - invalid recipient: ${to}`);
+    return;
+  }
+  
   try {
     await t.sendMail({
       from: `"Roomie Split" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
@@ -32,7 +39,7 @@ async function sendMail({ to, subject, html }) {
     });
     console.log(`📧 Sent to ${to}: ${subject}`);
   } catch (err) {
-    console.error('📧 Email error:', err.message);
+    console.error(`📧 Email error (to: ${to}):`, err.message);
   }
 }
 
@@ -613,6 +620,77 @@ export async function sendPaymentRejectedEmail({
   await sendMail({
     to: toEmail,
     subject: `[Roomie Split] ❌ ${payerName} did not confirm your ${amountFmt} payment for ${purpose}`,
+    html: emailWrapper(content),
+  });
+}
+
+// ── Bulk Payment Reminder Email (Multiple Splits) ─────────────────────────
+export async function sendBulkPaymentReminderEmail({
+  toEmail, toName, roomName, totalOwed, splits,
+}) {
+  if (!toEmail || !splits || splits.length === 0) return;
+
+  const totalFmt = formatRupees(totalOwed);
+  
+  // Build list of pending payments
+  const splitsList = splits.map(s => {
+    const amount = s.share + (s.carry_forward || 0);
+    const amountFmt = formatRupees(amount);
+    const dateStr = new Date(s.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+    const emoji = getCategoryEmoji(s.category);
+    
+    return `
+      <tr>
+        <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;">
+          <div style="font-size:14px;font-weight:600;color:#111827;margin-bottom:2px;">
+            ${emoji} ${s.purpose}
+          </div>
+          <div style="font-size:12px;color:#9ca3af;">${dateStr} · Pay ${s.payer_name}</div>
+        </td>
+        <td style="padding:12px 16px;border-bottom:1px solid #f3f4f6;text-align:right;">
+          <div style="font-size:16px;font-weight:700;color:#cc4a12;">${amountFmt}</div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Hi ${toName},</p>
+    <p style="margin:0 0 24px;font-size:14px;color:#6b7280;">
+      You have <strong>${splits.length} pending payment${splits.length > 1 ? 's' : ''}</strong> in <strong>${roomName}</strong>.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:16px;margin-bottom:24px;">
+      <tr><td style="padding:24px;text-align:center;">
+        <div style="font-size:13px;color:#b45309;margin-bottom:4px;">Total Amount Due</div>
+        <div style="font-size:36px;font-weight:800;color:#cc4a12;">${totalFmt}</div>
+        <div style="font-size:13px;color:#b45309;margin-top:8px;">${splits.length} pending payment${splits.length > 1 ? 's' : ''}</div>
+      </td></tr>
+    </table>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;margin-bottom:24px;">
+      ${splitsList}
+    </table>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center">
+        <a href="${process.env.FRONTEND_URL || 'https://rommie-split-frontend-4dzb.vercel.app'}" 
+           style="display:block;background:#4f46e5;color:#fff;text-decoration:none;text-align:center;padding:16px;border-radius:12px;font-size:15px;font-weight:700;">
+          Open App to Pay
+        </a>
+      </td></tr>
+    </table>
+
+    <p style="margin:16px 0 0;font-size:12px;color:#9ca3af;text-align:center;">
+      Tap the button above to open the app and settle your pending payments.
+    </p>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] 💸 You have ${splits.length} pending payment${splits.length > 1 ? 's' : ''} (${totalFmt})`,
     html: emailWrapper(content),
   });
 }

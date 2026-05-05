@@ -79,6 +79,22 @@ export async function getUnpaidBalanceForMember(memberId) {
   return parseInt(res.rows[0].total, 10) || 0;
 }
 
+/**
+ * Get unpaid balance for a specific debtor to a specific payer.
+ * This is used for carry_forward calculation to avoid double-counting.
+ * Only includes unpaid splits where the debtor owes money to this specific payer.
+ */
+export async function getUnpaidBalanceToSpecificPayer(debtorId, payerId) {
+  const res = await query(
+    `SELECT COALESCE(SUM(s.share + s.carry_forward), 0) AS total
+     FROM splits s
+     JOIN expenses e ON s.expense_id = e.id
+     WHERE s.member_id = ? AND e.payer_id = ? AND s.paid = 0`,
+    [debtorId, payerId]
+  );
+  return parseInt(res.rows[0].total, 10) || 0;
+}
+
 export async function getMemberNetBalance(memberId) {
   // What this member owes to others (unpaid splits where they are the debtor)
   const owedRes = await query(
@@ -110,16 +126,38 @@ export async function getMemberNetBalance(memberId) {
 
 export async function getUnpaidSplitsForMember(memberId) {
   const res = await query(
-    `SELECT s.*, e.purpose, e.date, e.total_amount,
+    `SELECT s.*, e.purpose, e.date, e.total_amount, e.payer_id,
             p.name AS payer_name, p.upi_id AS payer_upi_id,
             p.qr_code_base64 AS payer_qr, p.color AS payer_color,
-            p.avatar_initials AS payer_initials
+            p.avatar_initials AS payer_initials,
+            m.name AS member_name, m.color AS member_color,
+            m.avatar_initials AS member_initials
      FROM splits s
      JOIN expenses e ON s.expense_id = e.id
      JOIN members p ON e.payer_id = p.id
+     JOIN members m ON s.member_id = m.id
      WHERE s.member_id = ? AND s.paid = 0 AND e.payer_id != ?
      ORDER BY e.date DESC`,
     [memberId, memberId]
+  );
+  return res.rows.map(normalizeRow);
+}
+
+export async function getPendingVerificationSplitsForPayer(payerId) {
+  const res = await query(
+    `SELECT s.*, e.purpose, e.date, e.total_amount, e.payer_id,
+            p.name AS payer_name, p.upi_id AS payer_upi_id,
+            p.qr_code_base64 AS payer_qr, p.color AS payer_color,
+            p.avatar_initials AS payer_initials,
+            m.name AS member_name, m.color AS member_color,
+            m.avatar_initials AS member_initials
+     FROM splits s
+     JOIN expenses e ON s.expense_id = e.id
+     JOIN members p ON e.payer_id = p.id
+     JOIN members m ON s.member_id = m.id
+     WHERE e.payer_id = ? AND s.payment_status = 'pending_verification'
+     ORDER BY e.date DESC`,
+    [payerId]
   );
   return res.rows.map(normalizeRow);
 }
