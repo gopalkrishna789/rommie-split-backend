@@ -471,3 +471,148 @@ export async function sendPaymentReminderEmail({
     html: emailWrapper(content),
   });
 }
+
+// ── Payment Pending Verification Email (to Payer) ─────────────────────────
+export async function sendPaymentPendingEmail({
+  toEmail, toName, fromName, amount, purpose, roomName, splitId,
+}) {
+  if (!toEmail) return;
+
+  const amountFmt = formatRupees(amount);
+  const base = (process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 3001}`);
+  const approveUrl = `${base}/api/splits/${splitId}/payer-verify`;
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Hi ${toName},</p>
+    <p style="margin:0 0 24px;font-size:14px;color:#6b7280;">
+      <strong style="color:#4f46e5;">${fromName}</strong> claims they paid you in <strong>${roomName}</strong>.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#fff7ed;border:1.5px solid #fed7aa;border-radius:16px;margin-bottom:24px;">
+      <tr><td style="padding:24px;text-align:center;">
+        <div style="font-size:13px;color:#b45309;margin-bottom:4px;">${purpose}</div>
+        <div style="font-size:32px;font-weight:800;color:#cc4a12;">${amountFmt}</div>
+        <div style="font-size:13px;color:#b45309;margin-top:8px;">from <strong>${fromName}</strong></div>
+      </td></tr>
+    </table>
+
+    <p style="margin:0 0 16px;font-size:14px;color:#374151;font-weight:600;">
+      Did you receive this payment?
+    </p>
+
+    <p style="margin:0 0 24px;font-size:13px;color:#6b7280;">
+      Please confirm in the app whether you received ${amountFmt} from ${fromName}.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center">
+        <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}" style="display:block;background:#4f46e5;color:#fff;text-decoration:none;text-align:center;padding:14px;border-radius:12px;font-size:15px;font-weight:700;">
+          Open Roomie Split to Confirm
+        </a>
+      </td></tr>
+    </table>
+
+    <p style="margin:16px 0 0;font-size:11px;color:#9ca3af;text-align:center;">
+      Go to the app → Pending Payments → Confirm or Reject
+    </p>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] ${fromName} claims they paid ${amountFmt} for ${purpose}`,
+    html: emailWrapper(content),
+  });
+}
+
+// ── Payment Confirmed Email (to Debtor) ───────────────────────────────────
+export async function sendPaymentConfirmedEmail({
+  toEmail, toName, payerName, amount, purpose, roomName,
+}) {
+  if (!toEmail) return;
+
+  const amountFmt = formatRupees(amount);
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Hi ${toName},</p>
+    <p style="margin:0 0 28px;font-size:14px;color:#6b7280;">
+      Great news! <strong style="color:#15803d;">${payerName}</strong> confirmed they received your payment in <strong>${roomName}</strong>.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:linear-gradient(135deg,#f0fdf4,#dcfce7);border:1.5px solid #86efac;border-radius:16px;margin-bottom:28px;">
+      <tr>
+        <td style="padding:32px 24px;text-align:center;">
+          <div style="font-size:48px;margin-bottom:12px;">✅</div>
+          <div style="font-size:32px;font-weight:800;color:#15803d;margin-bottom:6px;">${amountFmt}</div>
+          <div style="font-size:15px;color:#16a34a;font-weight:600;margin-bottom:8px;">
+            Payment Confirmed
+          </div>
+          <div style="display:inline-block;background:rgba(255,255,255,0.7);border-radius:8px;padding:6px 16px;">
+            <span style="font-size:13px;color:#374151;">
+              for <strong>${purpose}</strong> &nbsp;&bull;&nbsp; ${roomName}
+            </span>
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    <p style="margin:0;font-size:13px;color:#6b7280;text-align:center;">
+      Your balance has been updated in Roomie Split.
+    </p>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] ✅ ${payerName} confirmed your ${amountFmt} payment for ${purpose}`,
+    html: emailWrapper(content),
+  });
+}
+
+// ── Payment Rejected Email (to Debtor) ────────────────────────────────────
+export async function sendPaymentRejectedEmail({
+  toEmail, toName, payerName, amount, purpose, roomName,
+}) {
+  if (!toEmail) return;
+
+  const amountFmt = formatRupees(amount);
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Hi ${toName},</p>
+    <p style="margin:0 0 28px;font-size:14px;color:#6b7280;">
+      <strong style="color:#cc4a12;">${payerName}</strong> did not confirm receiving your payment in <strong>${roomName}</strong>.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#fef2f2;border:1.5px solid #fecaca;border-radius:16px;margin-bottom:28px;">
+      <tr>
+        <td style="padding:32px 24px;text-align:center;">
+          <div style="font-size:48px;margin-bottom:12px;">❌</div>
+          <div style="font-size:32px;font-weight:800;color:#cc4a12;margin-bottom:6px;">${amountFmt}</div>
+          <div style="font-size:15px;color:#dc2626;font-weight:600;margin-bottom:8px;">
+            Payment Not Confirmed
+          </div>
+          <div style="display:inline-block;background:rgba(255,255,255,0.7);border-radius:8px;padding:6px 16px;">
+            <span style="font-size:13px;color:#374151;">
+              for <strong>${purpose}</strong> &nbsp;&bull;&nbsp; ${roomName}
+            </span>
+          </div>
+        </td>
+      </tr>
+    </table>
+
+    <p style="margin:0 0 16px;font-size:14px;color:#374151;">
+      Please check with ${payerName} and try paying again.
+    </p>
+
+    <p style="margin:0;font-size:13px;color:#6b7280;text-align:center;">
+      The payment is still marked as unpaid in Roomie Split.
+    </p>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] ❌ ${payerName} did not confirm your ${amountFmt} payment for ${purpose}`,
+    html: emailWrapper(content),
+  });
+}

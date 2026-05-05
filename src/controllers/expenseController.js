@@ -181,62 +181,48 @@ export async function markPaid(request, reply) {
     return reply.code(400).send({ error: 'Split already marked as paid' });
   }
 
-  const updated = await markSplitPaid(splitId);
-  if (!updated) return reply.code(400).send({ error: 'Could not mark as paid' });
-
-  // Recalculate carry-forward on remaining unpaid splits for this member
-  refreshCarryForwardForMember(split.member_id).catch(console.error);
-
-  // Update the latest pending payment attempt to 'success'
-  const latestAttempt = await getLatestAttemptForSplit(splitId);
-  if (latestAttempt && latestAttempt.status === 'pending') {
-    await updatePaymentAttemptStatus(latestAttempt.id, 'success');
-  } else {
-    // No prior attempt recorded (e.g. manual mark) — create a success record
-    await createPaymentAttempt({
-      splitId,
-      memberId: currentMemberId,
-      upiApp: 'manual',
-      amount: split.share + (split.carry_forward || 0),
-    }).then((a) => a && updatePaymentAttemptStatus(a.id, 'success'));
+  // NEW: Mark as "pending_verification" instead of "paid"
+  // Only the debtor (member who owes) can initiate this
+  if (split.member_id !== currentMemberId) {
+    return reply.code(403).send({ error: 'Only the debtor can mark their own payment' });
   }
+
+  // Update split to pending_verification
+  const updated = await query(
+    `UPDATE splits SET payment_status = 'pending_verification' WHERE id = ?`,
+    [splitId]
+  );
+
+  if (!updated || updated.rowCount === 0) {
+    return reply.code(400).send({ error: 'Could not update payment status' });
+  }
+
+  // Get updated split
+  const updatedSplit = await getSplitById(splitId);
 
   // Invalidate Redis cache
   await invalidateBalanceCache(roomId);
 
   // Get payer info for notification
   const payer = await getMemberById(expense.payer_id);
+  const debtor = await getMemberById(split.member_id);
 
-  // Emit Socket.io event
-  emitSplitPaid(roomId, {
+  // Emit Socket.io event to payer
+  emitToRoom(roomId, 'payment:pending_verification', {
     splitId,
-    memberId: split.member_id,
-    memberName: split.member_name,
+    debtorId: split.member_id,
+    debtorName: debtor.name,
+    payerId: expense.payer_id,
     amount: split.share + split.carry_forward,
     expenseId: split.expense_id,
     purpose: split.purpose,
-  });
-
-  // Emit updated balance
-  const [memberBalance, payerBalance] = await Promise.all([
-    getMemberNetBalance(split.member_id),
-    getMemberNetBalance(expense.payer_id),
-  ]);
-
-  emitBalanceUpdated(roomId, {
-    memberId: split.member_id,
-    newBalance: memberBalance,
-  });
-  emitBalanceUpdated(roomId, {
-    memberId: expense.payer_id,
-    newBalance: payerBalance,
   });
 
   // Push notification to payer
   if (payer) {
     notifyPaymentReceived(
       payer,
-      split.member_name,
+      debtor.name,
       split.share + split.carry_forward,
       split.purpose,
       split.expense_id
@@ -245,26 +231,33 @@ export async function markPaid(request, reply) {
     // Email notification to payer
     if (payer.email) {
       const room2 = await getRoomById(roomId).catch(() => null);
-      sendPaymentReceivedEmail({
+      const { sendPaymentPendingEmail } = await import('../services/emailService.js');
+      sendPaymentPendingEmail({
         toEmail: payer.email,
         toName: payer.name,
-        fromName: split.member_name,
+        fromName: debtor.name,
         amount: split.share + split.carry_forward,
         purpose: split.purpose,
         roomName: room2?.name || 'your room',
+        splitId,
       }).catch(console.error);
     }
   }
 
   // Log activity
   logActivity({
-    roomId, memberId: split.member_id, memberName: split.member_name,
-    action: 'payment_made',
-    details: `Paid ${split.purpose}`,
+    roomId, memberId: split.member_id, memberName: debtor.name,
+    action: 'payment_claimed',
+    details: `Claimed payment for ${split.purpose} - awaiting payer confirmation`,
     amount: split.share + split.carry_forward, expenseId: split.expense_id,
   }).catch(() => {});
 
-  return reply.send({ success: true, split: updated });
+  return reply.send({ 
+    success: true, 
+    split: updatedSplit,
+    status: 'pending_verification',
+    message: 'Payment marked as pending. Waiting for payer to confirm.'
+  });
 }
 
 /**
@@ -341,6 +334,120 @@ export async function editExpense(request, reply) {
 }
 
 /**
+ * Payer confirms that they received the payment
+ * (replaces the old payerMarksPaid which was for marking on behalf)
+ */
+export async function payerConfirmPayment(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: splitId } = request.params;
+  const { approve } = request.body; // true = approve, false = reject
+
+  const split = await getSplitById(splitId);
+  if (!split) return reply.code(404).send({ error: 'Split not found' });
+
+  const expense = await getExpenseById(split.expense_id);
+  if (!expense || expense.room_id !== roomId) return reply.code(403).send({ error: 'Forbidden' });
+
+  // Only the payer of the expense can confirm
+  if (expense.payer_id !== currentMemberId) {
+    return reply.code(403).send({ error: 'Only the payer can confirm payments' });
+  }
+
+  // Check if payment is pending verification
+  const currentSplit = await query(`SELECT * FROM splits WHERE id = ?`, [splitId]);
+  if (!currentSplit.rows[0]) return reply.code(404).send({ error: 'Split not found' });
+  
+  const paymentStatus = currentSplit.rows[0].payment_status || 'unpaid';
+  
+  if (paymentStatus !== 'pending_verification') {
+    return reply.code(400).send({ error: 'Payment is not pending verification' });
+  }
+
+  if (approve) {
+    // Approve: Mark as paid
+    const updated = await markSplitPaid(splitId);
+    await invalidateBalanceCache(roomId);
+    refreshCarryForwardForMember(split.member_id).catch(console.error);
+
+    // Update payment status
+    await query(`UPDATE splits SET payment_status = 'paid' WHERE id = ?`, [splitId]);
+
+    emitSplitPaid(roomId, {
+      splitId, memberId: split.member_id, memberName: split.member_name,
+      amount: split.share + split.carry_forward,
+      expenseId: split.expense_id, purpose: split.purpose,
+    });
+
+    // Emit updated balances
+    const [memberBalance, payerBalance] = await Promise.all([
+      getMemberNetBalance(split.member_id),
+      getMemberNetBalance(expense.payer_id),
+    ]);
+
+    emitBalanceUpdated(roomId, { memberId: split.member_id, newBalance: memberBalance });
+    emitBalanceUpdated(roomId, { memberId: expense.payer_id, newBalance: payerBalance });
+
+    logActivity({
+      roomId, memberId: currentMemberId, memberName: expense.payer_name,
+      action: 'payment_confirmed',
+      details: `Confirmed payment from ${split.member_name} for ${split.purpose}`,
+      amount: split.share + split.carry_forward, expenseId: split.expense_id,
+    }).catch(() => {});
+
+    // Notify debtor that payment was confirmed
+    const debtor = await getMemberById(split.member_id);
+    if (debtor?.email) {
+      const room = await getRoomById(roomId).catch(() => null);
+      const { sendPaymentConfirmedEmail } = await import('../services/emailService.js');
+      sendPaymentConfirmedEmail({
+        toEmail: debtor.email,
+        toName: debtor.name,
+        payerName: expense.payer_name,
+        amount: split.share + split.carry_forward,
+        purpose: split.purpose,
+        roomName: room?.name || 'your room',
+      }).catch(console.error);
+    }
+
+    return reply.send({ success: true, split: updated, status: 'confirmed' });
+  } else {
+    // Reject: Mark back as unpaid
+    await query(`UPDATE splits SET payment_status = 'unpaid' WHERE id = ?`, [splitId]);
+    await invalidateBalanceCache(roomId);
+
+    emitToRoom(roomId, 'payment:rejected', {
+      splitId, memberId: split.member_id, memberName: split.member_name,
+      amount: split.share + split.carry_forward,
+      expenseId: split.expense_id, purpose: split.purpose,
+    });
+
+    logActivity({
+      roomId, memberId: currentMemberId, memberName: expense.payer_name,
+      action: 'payment_rejected',
+      details: `Rejected payment claim from ${split.member_name} for ${split.purpose}`,
+      amount: split.share + split.carry_forward, expenseId: split.expense_id,
+    }).catch(() => {});
+
+    // Notify debtor that payment was rejected
+    const debtor = await getMemberById(split.member_id);
+    if (debtor?.email) {
+      const room = await getRoomById(roomId).catch(() => null);
+      const { sendPaymentRejectedEmail } = await import('../services/emailService.js');
+      sendPaymentRejectedEmail({
+        toEmail: debtor.email,
+        toName: debtor.name,
+        payerName: expense.payer_name,
+        amount: split.share + split.carry_forward,
+        purpose: split.purpose,
+        roomName: room?.name || 'your room',
+      }).catch(console.error);
+    }
+
+    return reply.send({ success: true, status: 'rejected' });
+  }
+}
+
+/**
  * Payer marks a specific debtor's split as paid on their behalf
  * (e.g. cash payment, outside-app UPI, etc.)
  */
@@ -362,6 +469,7 @@ export async function payerMarksPaid(request, reply) {
   if (split.paid) return reply.code(400).send({ error: 'Split already paid' });
 
   const updated = await markSplitPaid(splitId);
+  await query(`UPDATE splits SET payment_status = 'paid' WHERE id = ?`, [splitId]);
   await invalidateBalanceCache(roomId);
   refreshCarryForwardForMember(split.member_id).catch(console.error);
 

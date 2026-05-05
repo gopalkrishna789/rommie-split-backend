@@ -12,6 +12,7 @@ import {
   getActivity,
   getSettlementPlan,
   payerMarksPaid,
+  payerConfirmPayment,
   toggleRoomLock,
   removeMember,
   sendManualReminder,
@@ -158,6 +159,18 @@ export default async function expenseRoutes(fastify, options) {
     const splits = await getUnpaidSplitsForMember(memberId);
     return reply.send({ splits });
   });
+
+  // Payer confirms or rejects a payment claim
+  fastify.post('/splits/:id/payer-verify', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+      body: {
+        type: 'object',
+        required: ['approve'],
+        properties: { approve: { type: 'boolean' } },
+      },
+    },
+  }, payerConfirmPayment);
 
   // Payer marks a debtor's split as paid (cash / outside-app payment)
   fastify.post('/splits/:id/payer-confirm', {

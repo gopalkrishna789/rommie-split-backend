@@ -118,6 +118,7 @@ if (USE_SQLITE) {
     `ALTER TABLE members ADD COLUMN password_hash TEXT`,
     `ALTER TABLE members ADD COLUMN photo_base64 TEXT`,
     `ALTER TABLE splits ADD COLUMN amount_paid INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE splits ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid'`,
     `ALTER TABLE rooms ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE rooms ADD COLUMN max_members INTEGER NOT NULL DEFAULT 10`,
   ];
