@@ -13,6 +13,7 @@ import authRoutes from './routes/auth.js';
 import memberRoutes from './routes/members.js';
 import expenseRoutes from './routes/expenses.js';
 import notificationRoutes from './routes/notifications.js';
+import adminRoutes from './routes/admin.js';
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -78,6 +79,7 @@ async function buildApp() {
   await fastify.register(memberRoutes, { prefix: '/api' });
   await fastify.register(expenseRoutes, { prefix: '/api' });
   await fastify.register(notificationRoutes, { prefix: '/api' });
+  await fastify.register(adminRoutes, { prefix: '/api/admin' });
 
   // ── UPI Pay redirect (used in emails — Gmail blocks custom schemes) ──────
   // This HTTPS endpoint redirects to the UPI deep link on the device.
