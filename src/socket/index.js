@@ -78,3 +78,8 @@ export function emitToRoom(roomId, event, data) {
   if (!io) return;
   io.to(`room:${roomId}`).emit(event, data);
 }
+
+export function emitExpenseUpdated(roomId, data) {
+  if (!io) return;
+  io.to(`room:${roomId}`).emit('expense:updated', data);
+}

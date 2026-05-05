@@ -47,11 +47,26 @@ export async function getSplitById(splitId) {
 
 export async function markSplitPaid(splitId) {
   await query(
-    `UPDATE splits SET paid = 1, paid_at = datetime('now') WHERE id = ? AND paid = 0`,
+    `UPDATE splits SET paid = 1, paid_at = datetime('now'), amount_paid = share WHERE id = ? AND paid = 0`,
     [splitId]
   );
   const res = await query(`SELECT * FROM splits WHERE id = ?`, [splitId]);
   return res.rows[0] ? normalizeRow(res.rows[0]) : null;
+}
+
+export async function markSplitPartialPaid(splitId, amountPaid) {
+  const res = await query(`SELECT * FROM splits WHERE id = ?`, [splitId]);
+  const split = res.rows[0];
+  if (!split) return null;
+  const total = split.share + split.carry_forward;
+  const newAmountPaid = Math.min((split.amount_paid || 0) + amountPaid, total);
+  const fullyPaid = newAmountPaid >= total;
+  await query(
+    `UPDATE splits SET amount_paid = ?, paid = ?, paid_at = CASE WHEN ? = 1 THEN datetime('now') ELSE paid_at END WHERE id = ?`,
+    [newAmountPaid, fullyPaid ? 1 : 0, fullyPaid ? 1 : 0, splitId]
+  );
+  const updated = await query(`SELECT * FROM splits WHERE id = ?`, [splitId]);
+  return updated.rows[0] ? normalizeRow(updated.rows[0]) : null;
 }
 
 export async function getUnpaidBalanceForMember(memberId) {
@@ -117,4 +132,117 @@ function normalizeRow(row) {
     try { out.push_subscription = JSON.parse(out.push_subscription); } catch {}
   }
   return out;
+}
+
+/**
+ * Recalculate unpaid splits when an expense's totalAmount changes.
+ * Only updates splits that are NOT yet paid — paid splits are left untouched.
+ * Distributes the new total equally among all members (same as original equal split).
+ */
+export async function recalculateSplitsForExpense(expenseId, newTotalAmount) {
+  // Get all splits for this expense
+  const res = await query(
+    `SELECT s.*, e.payer_id FROM splits s JOIN expenses e ON s.expense_id = e.id WHERE s.expense_id = ?`,
+    [expenseId]
+  );
+  const splits = res.rows;
+  if (!splits.length) return;
+
+  const memberCount = splits.length;
+  const perShare = Math.round(newTotalAmount / memberCount);
+
+  // Distribute rounding remainder to the last unpaid non-payer split
+  let distributed = 0;
+  const unpaidNonPayer = splits.filter(s => !s.paid && s.member_id !== splits[0].payer_id);
+
+  for (let i = 0; i < splits.length; i++) {
+    const split = splits[i];
+    if (split.paid) continue; // never touch paid splits
+
+    let newShare;
+    if (i === splits.length - 1) {
+      // Last split gets the remainder to avoid rounding drift
+      newShare = newTotalAmount - distributed;
+    } else {
+      newShare = perShare;
+    }
+    distributed += newShare;
+
+    await query(
+      `UPDATE splits SET share = ? WHERE id = ? AND paid = 0`,
+      [newShare, split.id]
+    );
+  }
+}
+
+/**
+ * Get net balances for ALL members of a room in a single query.
+ * Replaces the N+1 pattern of calling getMemberNetBalance() per member.
+ */
+export async function getAllMemberBalances(roomId) {
+  // What each member owes (they are debtor, not payer)
+  const owedRes = await query(
+    `SELECT s.member_id,
+            COALESCE(SUM(s.share + s.carry_forward), 0) AS total_owed
+     FROM splits s
+     JOIN expenses e ON s.expense_id = e.id
+     WHERE e.room_id = ? AND s.paid = 0 AND e.payer_id != s.member_id
+     GROUP BY s.member_id`,
+    [roomId]
+  );
+
+  // What each member is owed (they are payer, others haven't paid)
+  const owedToRes = await query(
+    `SELECT e.payer_id AS member_id,
+            COALESCE(SUM(s.share + s.carry_forward), 0) AS total_owed_to
+     FROM splits s
+     JOIN expenses e ON s.expense_id = e.id
+     WHERE e.room_id = ? AND s.paid = 0 AND s.member_id != e.payer_id
+     GROUP BY e.payer_id`,
+    [roomId]
+  );
+
+  const owedMap   = Object.fromEntries(owedRes.rows.map(r => [r.member_id, parseInt(r.total_owed, 10) || 0]));
+  const owedToMap = Object.fromEntries(owedToRes.rows.map(r => [r.member_id, parseInt(r.total_owed_to, 10) || 0]));
+
+  return { owedMap, owedToMap };
+}
+
+/**
+ * After a split is paid, recalculate carry_forward on all remaining unpaid splits
+ * for that member so the balance shown is always current.
+ */
+export async function refreshCarryForwardForMember(memberId) {
+  // Get current total unpaid balance (excluding carry_forward to avoid double-counting)
+  const res = await query(
+    `SELECT COALESCE(SUM(share), 0) AS total_share
+     FROM splits
+     WHERE member_id = ? AND paid = 0`,
+    [memberId]
+  );
+  // The carry_forward on each unpaid split should reflect what was owed at creation time.
+  // We can't retroactively change history, but we CAN zero out stale carry_forward
+  // on splits that were created AFTER the payment that just happened.
+  // Simplest correct approach: set carry_forward = 0 on all unpaid splits
+  // where the carry_forward is now "stale" (i.e., the debt it referenced is now paid).
+  // We do this by recalculating: new carry_forward = current unpaid balance BEFORE this split.
+  const unpaidSplits = await query(
+    `SELECT s.id, s.carry_forward, s.share, e.created_at
+     FROM splits s
+     JOIN expenses e ON s.expense_id = e.id
+     WHERE s.member_id = ? AND s.paid = 0
+     ORDER BY e.created_at ASC`,
+    [memberId]
+  );
+
+  let runningBalance = 0;
+  for (const split of unpaidSplits.rows) {
+    if (split.carry_forward !== runningBalance) {
+      await query(
+        `UPDATE splits SET carry_forward = ? WHERE id = ?`,
+        [runningBalance, split.id]
+      );
+    }
+    runningBalance += split.share;
+  }
 }

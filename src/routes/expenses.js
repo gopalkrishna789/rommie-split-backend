@@ -7,6 +7,14 @@ import {
   recordPaymentAttempt,
   getPaymentAttempts,
   removeExpense,
+  editExpense,
+  partialPay,
+  getActivity,
+  getSettlementPlan,
+  payerMarksPaid,
+  toggleRoomLock,
+  removeMember,
+  sendManualReminder,
 } from '../controllers/expenseController.js';
 
 export default async function expenseRoutes(fastify, options) {
@@ -19,14 +27,17 @@ export default async function expenseRoutes(fastify, options) {
         type: 'object',
         required: ['payerId', 'purpose', 'totalAmount'],
         properties: {
-          payerId:      { type: 'string', format: 'uuid' },
-          purpose:      { type: 'string', minLength: 1, maxLength: 200 },
-          totalAmount:  { type: 'integer', minimum: 1 },
-          date:         { type: 'string', format: 'date' },
-          category:     { type: 'string', maxLength: 50 },
-          notes:        { type: 'string', maxLength: 500 },
-          splitMode:    { type: 'string', enum: ['equal', 'custom'] },
-          customShares: { type: 'object', additionalProperties: { type: 'integer' } },
+          payerId:       { type: 'string', format: 'uuid' },
+          purpose:       { type: 'string', minLength: 1, maxLength: 200 },
+          totalAmount:   { type: 'integer', minimum: 1 },
+          date:          { type: 'string', format: 'date' },
+          category:      { type: 'string', maxLength: 50 },
+          notes:         { type: 'string', maxLength: 500 },
+          receiptBase64: { type: 'string' },
+          isRecurring:   { type: 'boolean' },
+          recurringDay:  { type: 'integer', minimum: 1, maximum: 31 },
+          splitMode:     { type: 'string', enum: ['equal', 'custom'] },
+          customShares:  { type: 'object', additionalProperties: { type: 'integer' } },
         },
       },
     },
@@ -91,13 +102,52 @@ export default async function expenseRoutes(fastify, options) {
 
   fastify.get('/balances', getBalances);
 
+  // Edit expense (payer only)
+  fastify.put('/expenses/:id', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+      body: {
+        type: 'object',
+        properties: {
+          purpose:     { type: 'string', minLength: 1, maxLength: 200 },
+          category:    { type: 'string', maxLength: 50 },
+          notes:       { type: 'string', maxLength: 500 },
+          totalAmount: { type: 'integer', minimum: 1 },
+          date:        { type: 'string', format: 'date' },
+        },
+      },
+    },
+  }, editExpense);
+
+  // Partial payment
+  fastify.post('/splits/:id/partial-pay', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+      body: {
+        type: 'object',
+        required: ['amount'],
+        properties: { amount: { type: 'integer', minimum: 1 } },
+      },
+    },
+  }, partialPay);
+
+  // Activity feed
+  fastify.get('/activity', {
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: { limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+      },
+    },
+  }, getActivity);
+
+  // Settlement plan
+  fastify.get('/settlement-plan', getSettlementPlan);
+
   // Delete an expense — only when all roommates have paid
   fastify.delete('/expenses/:id', {
     schema: {
-      params: {
-        type: 'object',
-        properties: { id: { type: 'string', format: 'uuid' } },
-      },
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
     },
   }, removeExpense);
 
@@ -108,4 +158,36 @@ export default async function expenseRoutes(fastify, options) {
     const splits = await getUnpaidSplitsForMember(memberId);
     return reply.send({ splits });
   });
+
+  // Payer marks a debtor's split as paid (cash / outside-app payment)
+  fastify.post('/splits/:id/payer-confirm', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+  }, payerMarksPaid);
+
+  // Lock / unlock room (prevents new members joining)
+  fastify.post('/room/lock', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['lock'],
+        properties: { lock: { type: 'boolean' } },
+      },
+    },
+  }, toggleRoomLock);
+
+  // Remove a member from the room
+  fastify.delete('/members/:id/remove', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+  }, removeMember);
+
+  // Manual payment reminder — payer sends reminder email to a specific debtor
+  fastify.post('/splits/:id/remind', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+  }, sendManualReminder);
 }

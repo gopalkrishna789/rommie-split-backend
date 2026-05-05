@@ -28,13 +28,12 @@ export async function listMembers(request, reply) {
 
 export async function addMember(request, reply) {
   const { roomId } = request.user;
-  const { name, upiId, qrCodeBase64, color } = request.body;
+  const { name, upiId, email, qrCodeBase64, color } = request.body;
 
   if (!name || !upiId) {
     return reply.code(400).send({ error: 'name and upiId are required' });
   }
 
-  // Auto-assign color if not provided
   const existingMembers = await getMembersByRoom(roomId);
   const assignedColor = color || MEMBER_COLORS[existingMembers.length % MEMBER_COLORS.length];
   const avatarInitials = getInitials(name);
@@ -43,6 +42,7 @@ export async function addMember(request, reply) {
     roomId,
     name: name.trim(),
     upiId: upiId.trim(),
+    email: email?.trim() || null,
     qrCodeBase64: qrCodeBase64 || null,
     color: assignedColor,
     avatarInitials,
@@ -53,7 +53,7 @@ export async function addMember(request, reply) {
 
 export async function updateMemberHandler(request, reply) {
   const { id } = request.params;
-  const { name, upiId, qrCodeBase64, color } = request.body;
+  const { name, upiId, email, qrCodeBase64, color, photoBase64 } = request.body;
 
   const existing = await getMemberById(id);
   if (!existing) return reply.code(404).send({ error: 'Member not found' });
@@ -61,7 +61,7 @@ export async function updateMemberHandler(request, reply) {
     return reply.code(403).send({ error: 'Forbidden' });
   }
 
-  const updated = await updateMember({ memberId: id, name, upiId, qrCodeBase64, color });
+  const updated = await updateMember({ memberId: id, name, upiId, email, qrCodeBase64, color, photoBase64 });
   return reply.send({ member: updated });
 }
 

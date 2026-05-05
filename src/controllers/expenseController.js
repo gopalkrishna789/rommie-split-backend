@@ -1,6 +1,8 @@
-import { createExpense, getExpensesByRoom, getExpenseById, countExpensesByRoom, areAllSplitsPaid, deleteExpense } from '../db/queries/expenses.js';
-import { getSplitsByExpense, getSplitById, markSplitPaid, getMemberNetBalance } from '../db/queries/splits.js';
+import { createExpense, getExpensesByRoom, getExpenseById, countExpensesByRoom, areAllSplitsPaid, deleteExpense, updateExpense } from '../db/queries/expenses.js';
+import { getSplitsByExpense, getSplitById, markSplitPaid, markSplitPartialPaid, getMemberNetBalance, recalculateSplitsForExpense, getAllMemberBalances, refreshCarryForwardForMember } from '../db/queries/splits.js';
 import { getMembersByRoom, getMemberById } from '../db/queries/members.js';
+import { getRoomById } from '../db/queries/rooms.js';
+import { lockRoom, unlockRoom } from '../db/queries/rooms.js';
 import { createSplits } from '../services/splitService.js';
 import { invalidateBalanceCache, getCachedBalances, setCachedBalances } from '../services/redisService.js';
 import { notifyExpenseAdded, notifyPaymentReceived } from '../services/pushService.js';
@@ -11,10 +13,12 @@ import {
   getLatestAttemptForSplit,
   getAttemptsForSplit,
 } from '../db/queries/paymentAttempts.js';
+import { sendExpenseAddedEmail, sendPaymentReceivedEmail } from '../services/emailService.js';
+import { logActivity, getActivityForRoom } from '../db/queries/activity.js';
 
 export async function addExpense(request, reply) {
   const { roomId, memberId: currentMemberId } = request.user;
-  const { payerId, purpose, totalAmount, date, category, notes, customShares } = request.body;
+  const { payerId, purpose, totalAmount, date, category, notes, customShares, receiptBase64, isRecurring, recurringDay } = request.body;
 
   if (!payerId || !purpose || !totalAmount) {
     return reply.code(400).send({ error: 'payerId, purpose, and totalAmount are required' });
@@ -42,8 +46,11 @@ export async function addExpense(request, reply) {
     purpose: purpose.trim(),
     category: category || 'other',
     notes: notes?.trim() || null,
+    receiptBase64: receiptBase64 || null,
     totalAmount,
     date,
+    isRecurring: isRecurring || false,
+    recurringDay: recurringDay || null,
   });
 
   // Create splits for all members
@@ -82,6 +89,38 @@ export async function addExpense(request, reply) {
     expense.id,
     splits.map((s) => ({ ...s, payer_upi_id: payer.upi_id }))
   ).catch(console.error);
+
+  // Send email notifications to each debtor — skip the payer (non-blocking)
+  const room = await getRoomById(roomId).catch(() => null);
+  const roomName = room?.name || 'your room';
+  for (const split of splits) {
+    // Skip payer's own split (paid=true) and anyone without email
+    if (split.member_id === payerId) continue;
+    if (!split || split.paid) continue;
+    const member = members.find((m) => m.id === split.member_id);
+    if (!member?.email) continue;
+    sendExpenseAddedEmail({
+      toEmail: member.email,
+      toName: member.name,
+      payerName: payer.name,
+      payerUpiId: payer.upi_id,
+      purpose: expense.purpose,
+      category: expense.category || 'other',
+      totalAmount,
+      yourShare: split.share + (split.carry_forward || 0),
+      date: expense.date,
+      notes: expense.notes,
+      roomName,
+    }).catch(console.error);
+  }
+
+  // Log activity
+  logActivity({
+    roomId, memberId: currentMemberId, memberName: payer.name,
+    action: 'expense_added',
+    details: `Added ${expense.purpose} — ${members.length} members split`,
+    amount: totalAmount, expenseId: expense.id,
+  }).catch(() => {});
 
   return reply.code(201).send({
     expense: { ...expense, payer_name: payer.name },
@@ -145,6 +184,9 @@ export async function markPaid(request, reply) {
   const updated = await markSplitPaid(splitId);
   if (!updated) return reply.code(400).send({ error: 'Could not mark as paid' });
 
+  // Recalculate carry-forward on remaining unpaid splits for this member
+  refreshCarryForwardForMember(split.member_id).catch(console.error);
+
   // Update the latest pending payment attempt to 'success'
   const latestAttempt = await getLatestAttemptForSplit(splitId);
   if (latestAttempt && latestAttempt.status === 'pending') {
@@ -199,9 +241,275 @@ export async function markPaid(request, reply) {
       split.purpose,
       split.expense_id
     ).catch(console.error);
+
+    // Email notification to payer
+    if (payer.email) {
+      const room2 = await getRoomById(roomId).catch(() => null);
+      sendPaymentReceivedEmail({
+        toEmail: payer.email,
+        toName: payer.name,
+        fromName: split.member_name,
+        amount: split.share + split.carry_forward,
+        purpose: split.purpose,
+        roomName: room2?.name || 'your room',
+      }).catch(console.error);
+    }
   }
 
+  // Log activity
+  logActivity({
+    roomId, memberId: split.member_id, memberName: split.member_name,
+    action: 'payment_made',
+    details: `Paid ${split.purpose}`,
+    amount: split.share + split.carry_forward, expenseId: split.expense_id,
+  }).catch(() => {});
+
   return reply.send({ success: true, split: updated });
+}
+
+/**
+ * Partial payment — pay part of a split
+ */
+export async function partialPay(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: splitId } = request.params;
+  const { amount } = request.body;
+
+  if (!amount || amount <= 0) return reply.code(400).send({ error: 'Amount must be positive' });
+
+  const split = await getSplitById(splitId);
+  if (!split) return reply.code(404).send({ error: 'Split not found' });
+
+  const expense = await getExpenseById(split.expense_id);
+  if (!expense || expense.room_id !== roomId) return reply.code(403).send({ error: 'Forbidden' });
+  if (split.paid) return reply.code(400).send({ error: 'Split already fully paid' });
+
+  const updated = await markSplitPartialPaid(splitId, amount);
+  if (!updated) return reply.code(400).send({ error: 'Could not record partial payment' });
+
+  await invalidateBalanceCache(roomId);
+
+  logActivity({
+    roomId, memberId: currentMemberId, memberName: split.member_name,
+    action: 'partial_payment',
+    details: `Partial payment for ${split.purpose}`,
+    amount, expenseId: split.expense_id,
+  }).catch(() => {});
+
+  if (updated.paid) {
+    // Fully paid now — emit same events as full payment
+    const payer = await getMemberById(expense.payer_id);
+    emitSplitPaid(roomId, { splitId, memberId: split.member_id, memberName: split.member_name, amount: split.share + split.carry_forward, expenseId: split.expense_id, purpose: split.purpose });
+    if (payer?.email) {
+      const room = await getRoomById(roomId).catch(() => null);
+      sendPaymentReceivedEmail({ toEmail: payer.email, toName: payer.name, fromName: split.member_name, amount: split.share + split.carry_forward, purpose: split.purpose, roomName: room?.name || 'your room' }).catch(console.error);
+    }
+  }
+
+  return reply.send({ success: true, split: updated, fullyPaid: updated.paid });
+}
+
+/**
+ * Edit an expense (payer only, before all splits are paid)
+ * If totalAmount changes, unpaid splits are recalculated automatically.
+ */
+export async function editExpense(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: expenseId } = request.params;
+  const { purpose, category, notes, totalAmount, date } = request.body;
+
+  const expense = await getExpenseById(expenseId);
+  if (!expense || expense.room_id !== roomId) return reply.code(404).send({ error: 'Expense not found' });
+  if (expense.payer_id !== currentMemberId) return reply.code(403).send({ error: 'Only the payer can edit this expense' });
+
+  const updated = await updateExpense({ expenseId, purpose, category, notes, totalAmount, date });
+
+  // If the total amount changed, recalculate unpaid splits proportionally
+  if (totalAmount && totalAmount !== expense.total_amount) {
+    await recalculateSplitsForExpense(expenseId, totalAmount);
+  }
+
+  await invalidateBalanceCache(roomId);
+  emitToRoom(roomId, 'expense:updated', { expenseId, expense: updated });
+
+  logActivity({
+    roomId, memberId: currentMemberId, memberName: expense.payer_name,
+    action: 'expense_edited', details: `Edited ${expense.purpose}`, expenseId,
+  }).catch(() => {});
+
+  return reply.send({ success: true, expense: updated });
+}
+
+/**
+ * Payer marks a specific debtor's split as paid on their behalf
+ * (e.g. cash payment, outside-app UPI, etc.)
+ */
+export async function payerMarksPaid(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: splitId } = request.params;
+
+  const split = await getSplitById(splitId);
+  if (!split) return reply.code(404).send({ error: 'Split not found' });
+
+  const expense = await getExpenseById(split.expense_id);
+  if (!expense || expense.room_id !== roomId) return reply.code(403).send({ error: 'Forbidden' });
+
+  // Only the payer of the expense can use this endpoint
+  if (expense.payer_id !== currentMemberId) {
+    return reply.code(403).send({ error: 'Only the expense payer can mark others as paid' });
+  }
+
+  if (split.paid) return reply.code(400).send({ error: 'Split already paid' });
+
+  const updated = await markSplitPaid(splitId);
+  await invalidateBalanceCache(roomId);
+  refreshCarryForwardForMember(split.member_id).catch(console.error);
+
+  emitSplitPaid(roomId, {
+    splitId, memberId: split.member_id, memberName: split.member_name,
+    amount: split.share + split.carry_forward,
+    expenseId: split.expense_id, purpose: split.purpose,
+  });
+
+  logActivity({
+    roomId, memberId: currentMemberId, memberName: expense.payer_name,
+    action: 'payment_made',
+    details: `Marked ${split.member_name} as paid for ${split.purpose} (recorded by payer)`,
+    amount: split.share + split.carry_forward, expenseId: split.expense_id,
+  }).catch(() => {});
+
+  return reply.send({ success: true, split: updated });
+}
+
+/**
+ * Lock / unlock a room (prevents new members from joining)
+ */
+export async function toggleRoomLock(request, reply) {
+  const { roomId } = request.user;
+  const { lock } = request.body;
+  const room = lock ? await lockRoom(roomId) : await unlockRoom(roomId);
+  emitToRoom(roomId, 'room:lock_changed', { isLocked: room.is_locked === 1 || room.is_locked === true });
+  return reply.send({ success: true, room });
+}
+
+/**
+ * Remove a member from the room (admin action — any member can remove others for now)
+ */
+export async function removeMember(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: targetMemberId } = request.params;
+
+  if (targetMemberId === currentMemberId) {
+    return reply.code(400).send({ error: 'You cannot remove yourself' });
+  }
+
+  const { getMemberById } = await import('../db/queries/members.js');
+  const target = await getMemberById(targetMemberId);
+  if (!target || target.room_id !== roomId) {
+    return reply.code(404).send({ error: 'Member not found in this room' });
+  }
+
+  // Check if member has unpaid splits — block removal if so
+  const { getUnpaidSplitsForMember } = await import('../db/queries/splits.js');
+  const unpaid = await getUnpaidSplitsForMember(targetMemberId);
+  if (unpaid.length > 0) {
+    return reply.code(400).send({ error: `${target.name} has ${unpaid.length} unpaid split(s). Settle up before removing.` });
+  }
+
+  const { query } = await import('../db/index.js');
+  await query(`DELETE FROM members WHERE id = ? AND room_id = ?`, [targetMemberId, roomId]);
+
+  await invalidateBalanceCache(roomId);
+  emitToRoom(roomId, 'member:removed', { memberId: targetMemberId, memberName: target.name });
+
+  return reply.send({ success: true, removedMemberId: targetMemberId });
+}
+
+/**
+ * Manual payment reminder — payer triggers reminder email for a specific split
+ */
+export async function sendManualReminder(request, reply) {
+  const { roomId, memberId: currentMemberId } = request.user;
+  const { id: splitId } = request.params;
+
+  const split = await getSplitById(splitId);
+  if (!split) return reply.code(404).send({ error: 'Split not found' });
+
+  const expense = await getExpenseById(split.expense_id);
+  if (!expense || expense.room_id !== roomId) return reply.code(403).send({ error: 'Forbidden' });
+  if (expense.payer_id !== currentMemberId) return reply.code(403).send({ error: 'Only the payer can send reminders' });
+  if (split.paid) return reply.code(400).send({ error: 'Split already paid' });
+
+  const { getMemberById: getMember } = await import('../db/queries/members.js');
+  const debtor = await getMember(split.member_id);
+  const payer  = await getMember(expense.payer_id);
+  const room   = await getRoomById(roomId).catch(() => null);
+
+  if (!debtor?.email) return reply.code(400).send({ error: `${debtor?.name || 'Member'} has no email address set` });
+
+  const { sendPaymentReminderEmail } = await import('../services/emailService.js');
+  await sendPaymentReminderEmail({
+    toEmail: debtor.email,
+    toName: debtor.name,
+    payerName: payer?.name || 'your roommate',
+    payerUpiId: payer?.upi_id || '',
+    purpose: expense.purpose,
+    amount: split.share + (split.carry_forward || 0),
+    date: expense.date,
+    roomName: room?.name || 'your room',
+    splitId,
+  });
+
+  return reply.send({ success: true, sentTo: debtor.email });
+}
+
+export async function getActivity(request, reply) {
+  const { roomId } = request.user;
+  const limit = parseInt(request.query.limit || '50', 10);
+  const activities = await getActivityForRoom(roomId, limit);
+  return reply.send({ activities });
+}
+
+/**
+ * Settlement summary — minimum transactions to clear all debts
+ */
+export async function getSettlementPlan(request, reply) {
+  const { roomId } = request.user;
+  const members = await getMembersByRoom(roomId);
+
+  // Single-query balance fetch
+  const { owedMap, owedToMap } = await getAllMemberBalances(roomId);
+  const balances = members.map((m) => ({
+    memberId: m.id, memberName: m.name, upiId: m.upi_id, color: m.color,
+    net: (owedToMap[m.id] || 0) - (owedMap[m.id] || 0),
+  }));
+
+  const transactions = minimumTransactions(balances);
+  return reply.send({ transactions });
+}
+
+function minimumTransactions(balances) {
+  // Separate creditors (net > 0) and debtors (net < 0)
+  const creditors = balances.filter(b => b.net > 0).map(b => ({ ...b }));
+  const debtors   = balances.filter(b => b.net < 0).map(b => ({ ...b, net: -b.net }));
+  const txns = [];
+
+  let i = 0, j = 0;
+  while (i < debtors.length && j < creditors.length) {
+    const amount = Math.min(debtors[i].net, creditors[j].net);
+    if (amount > 0) {
+      txns.push({
+        from: { id: debtors[i].memberId, name: debtors[i].memberName, color: debtors[i].color },
+        to:   { id: creditors[j].memberId, name: creditors[j].memberName, upiId: creditors[j].upiId, color: creditors[j].color },
+        amount,
+      });
+    }
+    debtors[i].net   -= amount;
+    creditors[j].net -= amount;
+    if (debtors[i].net   < 1) i++;
+    if (creditors[j].net < 1) j++;
+  }
+  return txns;
 }
 
 /**
@@ -304,20 +612,23 @@ export async function getBalances(request, reply) {
     return reply.send({ balances: cached, cached: true });
   }
 
-  // Compute from DB
+  // Single-query balance calculation — replaces N+1 pattern
   const members = await getMembersByRoom(roomId);
-  const balances = await Promise.all(
-    members.map(async (member) => {
-      const balance = await getMemberNetBalance(member.id);
-      return {
-        memberId: member.id,
-        memberName: member.name,
-        color: member.color,
-        avatarInitials: member.avatar_initials,
-        ...balance,
-      };
-    })
-  );
+  const { owedMap, owedToMap } = await getAllMemberBalances(roomId);
+
+  const balances = members.map((member) => {
+    const totalOwed   = owedMap[member.id]   || 0;
+    const totalOwedTo = owedToMap[member.id] || 0;
+    return {
+      memberId:       member.id,
+      memberName:     member.name,
+      color:          member.color,
+      avatarInitials: member.avatar_initials,
+      totalOwed,
+      totalOwedTo,
+      netBalance:     totalOwedTo - totalOwed,
+    };
+  });
 
   // Cache result
   await setCachedBalances(roomId, balances);

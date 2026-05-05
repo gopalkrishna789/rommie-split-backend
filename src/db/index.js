@@ -91,12 +91,35 @@ if (USE_SQLITE) {
     CREATE INDEX IF NOT EXISTS idx_payment_attempts_split  ON payment_attempts(split_id);
     CREATE INDEX IF NOT EXISTS idx_payment_attempts_member ON payment_attempts(member_id);
     CREATE INDEX IF NOT EXISTS idx_payment_attempts_status ON payment_attempts(status);
+
+    CREATE TABLE IF NOT EXISTS activity_log (
+      id TEXT PRIMARY KEY,
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+      member_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      details TEXT,
+      amount INTEGER,
+      expense_id TEXT REFERENCES expenses(id) ON DELETE SET NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_activity_room ON activity_log(room_id);
+    CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at);
   `);
 
   // Add new columns to existing databases (safe — ignored if column already exists)
   const alterStatements = [
     `ALTER TABLE expenses ADD COLUMN category TEXT NOT NULL DEFAULT 'other'`,
     `ALTER TABLE expenses ADD COLUMN notes TEXT`,
+    `ALTER TABLE expenses ADD COLUMN receipt_base64 TEXT`,
+    `ALTER TABLE expenses ADD COLUMN is_recurring INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE expenses ADD COLUMN recurring_day INTEGER`,
+    `ALTER TABLE members ADD COLUMN email TEXT`,
+    `ALTER TABLE members ADD COLUMN password_hash TEXT`,
+    `ALTER TABLE members ADD COLUMN photo_base64 TEXT`,
+    `ALTER TABLE splits ADD COLUMN amount_paid INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE rooms ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE rooms ADD COLUMN max_members INTEGER NOT NULL DEFAULT 10`,
   ];
   for (const sql of alterStatements) {
     try { db.exec(sql); } catch (_) { /* column already exists — ignore */ }
