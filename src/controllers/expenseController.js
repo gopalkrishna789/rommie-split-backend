@@ -15,6 +15,7 @@ import {
 } from '../db/queries/paymentAttempts.js';
 import { sendExpenseAddedEmail, sendPaymentReceivedEmail } from '../services/emailService.js';
 import { logActivity, getActivityForRoom } from '../db/queries/activity.js';
+import { query } from '../db/index.js';
 
 export async function addExpense(request, reply) {
   const { roomId, memberId: currentMemberId } = request.user;
