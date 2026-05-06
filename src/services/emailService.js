@@ -7,7 +7,7 @@ function getTransporter() {
   if (transporter) return transporter;
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
   if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
-    console.warn('📧 Email not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS');
+    console.warn('📧 Email not configured — set SMTP_HOST, SMTP_USER, SMTP_PASS or RESEND_API_KEY');
     return null;
   }
   transporter = nodemailer.createTransport({
@@ -15,23 +15,65 @@ function getTransporter() {
     port: parseInt(SMTP_PORT || '587', 10),
     secure: parseInt(SMTP_PORT || '587', 10) === 465,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
-    pool: true, // Use connection pooling
+    pool: true,
     maxConnections: 5,
     maxMessages: 100,
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 10000,
   });
   console.log(`📧 Email service ready (${SMTP_USER})`);
   return transporter;
 }
 
+async function sendMailViaResend({ to, subject, html }) {
+  const RESEND_API_KEY = process.env.RESEND_API_KEY;
+  if (!RESEND_API_KEY) return null;
+
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: 'Roomie Split <onboarding@resend.dev>', // Use your verified domain later
+        to: [to],
+        subject,
+        html,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Resend API error: ${error}`);
+    }
+
+    const data = await response.json();
+    console.log(`📧 ✅ Sent via Resend to ${to}: ${subject}`);
+    return data;
+  } catch (err) {
+    console.error(`📧 ❌ Resend error (to: ${to}):`, err.message);
+    return null;
+  }
+}
+
 async function sendMail({ to, subject, html }) {
-  const t = getTransporter();
-  if (!t) return;
-  
   // Validate email address
   if (!to || typeof to !== 'string' || !to.includes('@') || to.length < 5) {
     console.warn(`📧 Skipping email - invalid recipient: ${to}`);
     return;
   }
+
+  // Try Resend first (works on Render), fallback to SMTP (local dev)
+  if (process.env.RESEND_API_KEY) {
+    const result = await sendMailViaResend({ to, subject, html });
+    if (result) return result;
+  }
+
+  // Fallback to SMTP (for local development)
+  const t = getTransporter();
+  if (!t) return;
   
   try {
     const info = await t.sendMail({
@@ -40,10 +82,10 @@ async function sendMail({ to, subject, html }) {
       subject,
       html,
     });
-    console.log(`📧 ✅ Sent to ${to}: ${subject}`);
+    console.log(`📧 ✅ Sent via SMTP to ${to}: ${subject}`);
     return info;
   } catch (err) {
-    console.error(`📧 ❌ Email error (to: ${to}):`, err.message);
+    console.error(`📧 ❌ SMTP error (to: ${to}):`, err.message);
     // Don't throw - just log the error so app continues working
   }
 }
