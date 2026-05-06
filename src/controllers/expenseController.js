@@ -584,41 +584,43 @@ export async function getActivity(request, reply) {
  */
 export async function getSettlementPlan(request, reply) {
   const { roomId } = request.user;
+  const { calculateNetSettlement, getDetailedBalances } = await import('../services/settlementService.js');
+  
   const members = await getMembersByRoom(roomId);
 
-  // Single-query balance fetch
-  const { owedMap, owedToMap } = await getAllMemberBalances(roomId);
-  const balances = members.map((m) => ({
-    memberId: m.id, memberName: m.name, upiId: m.upi_id, color: m.color,
-    net: (owedToMap[m.id] || 0) - (owedMap[m.id] || 0),
-  }));
+  // Get all unpaid splits with payer info
+  const result = await query(`
+    SELECT s.*, e.purpose, e.date, e.payer_id
+    FROM splits s
+    JOIN expenses e ON s.expense_id = e.id
+    WHERE e.room_id = ? AND s.paid = 0 AND e.payer_id != s.member_id
+  `, [roomId]);
 
-  const transactions = minimumTransactions(balances);
-  return reply.send({ transactions });
-}
+  const unpaidSplits = result.rows;
 
-function minimumTransactions(balances) {
-  // Separate creditors (net > 0) and debtors (net < 0)
-  const creditors = balances.filter(b => b.net > 0).map(b => ({ ...b }));
-  const debtors   = balances.filter(b => b.net < 0).map(b => ({ ...b, net: -b.net }));
-  const txns = [];
-
-  let i = 0, j = 0;
-  while (i < debtors.length && j < creditors.length) {
-    const amount = Math.min(debtors[i].net, creditors[j].net);
-    if (amount > 0) {
-      txns.push({
-        from: { id: debtors[i].memberId, name: debtors[i].memberName, color: debtors[i].color },
-        to:   { id: creditors[j].memberId, name: creditors[j].memberName, upiId: creditors[j].upiId, color: creditors[j].color },
-        amount,
-      });
-    }
-    debtors[i].net   -= amount;
-    creditors[j].net -= amount;
-    if (debtors[i].net   < 1) i++;
-    if (creditors[j].net < 1) j++;
+  if (unpaidSplits.length === 0) {
+    return reply.send({
+      transactions: [],
+      detailedBalances: [],
+      summary: {
+        totalTransactions: 0,
+        totalAmount: 0,
+        transactionsSaved: 0,
+        savingsPercentage: 0,
+      },
+    });
   }
-  return txns;
+
+  // Calculate optimized settlement with net offsetting
+  const settlement = calculateNetSettlement(members, unpaidSplits);
+  
+  // Get detailed breakdown (before netting)
+  const detailedBalances = getDetailedBalances(members, unpaidSplits);
+
+  return reply.send({
+    ...settlement,
+    detailedBalances,
+  });
 }
 
 /**

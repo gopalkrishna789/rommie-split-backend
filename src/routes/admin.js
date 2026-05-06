@@ -81,7 +81,7 @@ export default async function adminRoutes(fastify, options) {
   fastify.get('/members-emails', async (request, reply) => {
     try {
       const result = await query(`
-        SELECT m.id, m.name, m.email, m.phone, r.name as room_name, r.id as room_id
+        SELECT m.id, m.name, m.email, r.name as room_name, r.id as room_id
         FROM members m
         JOIN rooms r ON m.room_id = r.id
         ORDER BY r.name, m.name
@@ -91,7 +91,6 @@ export default async function adminRoutes(fastify, options) {
         id: m.id,
         name: m.name,
         email: m.email || null,
-        phone: m.phone || null,
         hasEmail: !!m.email,
         roomName: m.room_name,
         roomId: m.room_id,

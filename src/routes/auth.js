@@ -133,6 +133,21 @@ export default async function authRoutes(fastify, options) {
       sameSite: 'lax', path: '/', maxAge: 60 * 60 * 24 * 30,
     });
 
+    // Send welcome email (async, don't wait)
+    if (email) {
+      const { sendWelcomeEmail } = await import('../services/emailService.js');
+      const roommates = await getMembersByRoom(room.id);
+      const otherRoommates = roommates.filter(m => m.id !== member.id);
+      
+      sendWelcomeEmail({
+        toEmail: email,
+        toName: member.name,
+        roomName: room.name,
+        roomCode: room.invite_code,
+        roommates: otherRoommates,
+      }).catch(err => console.error('Welcome email error:', err.message));
+    }
+
     return reply.code(201).send({
       token,
       member: { id: member.id, name: member.name, upiId: member.upi_id, email: member.email, color: member.color, avatarInitials: member.avatar_initials },
@@ -260,7 +275,7 @@ export default async function authRoutes(fastify, options) {
     const { roomId, memberId } = request.user;
     const [roomRes, memberRes] = await Promise.all([
       query(`SELECT id, name, invite_code, rent_amount FROM rooms WHERE id = ?`, [roomId]),
-      query(`SELECT id, name, upi_id, email, color, avatar_initials FROM members WHERE id = ?`, [memberId]),
+      query(`SELECT id, name, upi_id, email, color, avatar_initials, tour_completed FROM members WHERE id = ?`, [memberId]),
     ]);
     return reply.send({ room: roomRes.rows[0], member: memberRes.rows[0] });
   });

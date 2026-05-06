@@ -41,12 +41,14 @@ if (USE_SQLITE) {
       id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
       room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
+      email TEXT,
       upi_id TEXT NOT NULL,
       qr_code_base64 TEXT,
       color TEXT NOT NULL DEFAULT '#6366f1',
       avatar_initials TEXT NOT NULL,
       fcm_token TEXT,
       push_subscription TEXT,
+      tour_completed INTEGER NOT NULL DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -117,13 +119,22 @@ if (USE_SQLITE) {
     `ALTER TABLE members ADD COLUMN email TEXT`,
     `ALTER TABLE members ADD COLUMN password_hash TEXT`,
     `ALTER TABLE members ADD COLUMN photo_base64 TEXT`,
+    `ALTER TABLE members ADD COLUMN tour_completed INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE splits ADD COLUMN amount_paid INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE splits ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid'`,
     `ALTER TABLE rooms ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE rooms ADD COLUMN max_members INTEGER NOT NULL DEFAULT 10`,
   ];
   for (const sql of alterStatements) {
-    try { db.exec(sql); } catch (_) { /* column already exists — ignore */ }
+    try { 
+      db.exec(sql);
+      console.log(`✅ Migration: ${sql.split('ADD COLUMN')[1]?.split('TEXT')[0]?.split('INTEGER')[0]?.trim() || 'executed'}`);
+    } catch (err) { 
+      // Column already exists — ignore
+      if (!err.message.includes('duplicate column')) {
+        console.warn(`⚠️  Migration warning: ${err.message}`);
+      }
+    }
   }
 
   // UUID v4 generator for SQLite (since it lacks uuid_generate_v4)

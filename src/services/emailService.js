@@ -694,3 +694,77 @@ export async function sendBulkPaymentReminderEmail({
     html: emailWrapper(content),
   });
 }
+
+// ── Welcome Email (When Joining Room) ─────────────────────────────────────
+export async function sendWelcomeEmail({
+  toEmail, toName, roomName, roomCode, roommates, invitedBy,
+}) {
+  if (!toEmail) return;
+
+  const roommatesList = roommates && roommates.length > 0
+    ? roommates.map(r => `
+        <tr>
+          <td style="padding:8px 16px;border-bottom:1px solid #f3f4f6;">
+            <div style="display:inline-block;width:32px;height:32px;border-radius:50%;background:${r.color || '#6366f1'};color:#fff;text-align:center;line-height:32px;font-weight:700;font-size:14px;margin-right:12px;vertical-align:middle;">
+              ${r.avatar_initials || r.name?.charAt(0) || '?'}
+            </div>
+            <span style="font-size:14px;font-weight:600;color:#111827;vertical-align:middle;">${r.name}</span>
+          </td>
+        </tr>
+      `).join('')
+    : '<tr><td style="padding:16px;text-align:center;color:#9ca3af;font-size:13px;">You\'re the first member!</td></tr>';
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Welcome, ${toName}! 🎉</p>
+    <p style="margin:0 0 24px;font-size:14px;color:#6b7280;">
+      ${invitedBy ? `<strong>${invitedBy}</strong> invited you to join` : 'You\'ve successfully joined'} <strong>${roomName}</strong> on Roomie Split!
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);border-radius:16px;margin-bottom:24px;">
+      <tr><td style="padding:24px;text-align:center;">
+        <div style="font-size:13px;color:#c4b5fd;margin-bottom:8px;font-weight:600;">Your Room Code</div>
+        <div style="font-size:32px;font-weight:800;color:#ffffff;letter-spacing:2px;">${roomCode}</div>
+        <div style="font-size:12px;color:#c4b5fd;margin-top:8px;">Share this code with your roommates</div>
+      </td></tr>
+    </table>
+
+    <div style="margin-bottom:24px;">
+      <p style="font-size:14px;font-weight:600;color:#111827;margin:0 0 12px;">Your Roommates:</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+        style="background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;">
+        ${roommatesList}
+      </table>
+    </div>
+
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:12px;padding:16px;margin-bottom:24px;">
+      <p style="margin:0 0 8px;font-size:14px;font-weight:600;color:#0369a1;">💡 Quick Tips:</p>
+      <ul style="margin:0;padding-left:20px;font-size:13px;color:#0c4a6e;line-height:1.6;">
+        <li>Add expenses as they happen</li>
+        <li>Split bills equally or customize shares</li>
+        <li>Pay directly via UPI with one tap</li>
+        <li>Track who owes what in real-time</li>
+      </ul>
+    </div>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr><td align="center">
+        <a href="${process.env.FRONTEND_URL || 'https://rommie-split-frontend-4dzb.vercel.app'}" 
+           style="display:block;background:#4f46e5;color:#fff;text-decoration:none;text-align:center;padding:16px;border-radius:12px;font-size:15px;font-weight:700;">
+          Open Roomie Split
+        </a>
+      </td></tr>
+    </table>
+
+    <p style="margin:24px 0 0;font-size:12px;color:#9ca3af;text-align:center;">
+      <strong>Sharing is caring!</strong> 💚<br/>
+      Keep your room finances transparent and stress-free.
+    </p>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] Welcome to ${roomName}! 🏠`,
+    html: emailWrapper(content),
+  });
+}

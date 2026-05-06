@@ -44,4 +44,14 @@ export default async function memberRoutes(fastify, options) {
       },
     },
   }, updateMemberHandler);
+
+  // ── Mark tour as completed ────────────────────────────────────────────────
+  fastify.post('/members/tour-complete', async (request, reply) => {
+    const { memberId } = request.user;
+    const { query } = await import('../db/index.js');
+    
+    await query('UPDATE members SET tour_completed = 1 WHERE id = ?', [memberId]);
+    
+    return reply.send({ success: true });
+  });
 }
