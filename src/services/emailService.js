@@ -25,6 +25,39 @@ function getTransporter() {
   return transporter;
 }
 
+async function sendMailViaBrevo({ to, subject, html }) {
+  const BREVO_API_KEY = process.env.BREVO_API_KEY;
+  if (!BREVO_API_KEY) return null;
+
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': BREVO_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sender: { name: 'Roomie Split', email: 'noreply@roomiesplit.app' },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Brevo API error: ${error}`);
+    }
+
+    const data = await response.json();
+    console.log(`📧 ✅ Sent via Brevo to ${to}: ${subject}`);
+    return data;
+  } catch (err) {
+    console.error(`📧 ❌ Brevo error (to: ${to}):`, err.message);
+    return null;
+  }
+}
+
 async function sendMailViaResend({ to, subject, html }) {
   const RESEND_API_KEY = process.env.RESEND_API_KEY;
   if (!RESEND_API_KEY) return null;
@@ -37,7 +70,7 @@ async function sendMailViaResend({ to, subject, html }) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        from: 'Roomie Split <onboarding@resend.dev>', // Use your verified domain later
+        from: 'Roomie Split <onboarding@resend.dev>',
         to: [to],
         subject,
         html,
@@ -65,7 +98,13 @@ async function sendMail({ to, subject, html }) {
     return;
   }
 
-  // Try Resend first (works on Render), fallback to SMTP (local dev)
+  // Try Brevo first (best for production - 300 emails/day free, no domain needed)
+  if (process.env.BREVO_API_KEY) {
+    const result = await sendMailViaBrevo({ to, subject, html });
+    if (result) return result;
+  }
+
+  // Try Resend (requires domain verification for non-owner emails)
   if (process.env.RESEND_API_KEY) {
     const result = await sendMailViaResend({ to, subject, html });
     if (result) return result;
