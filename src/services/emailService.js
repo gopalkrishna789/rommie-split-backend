@@ -37,7 +37,7 @@ async function sendMailViaBrevo({ to, subject, html }) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        sender: { name: 'Roomie Split', email: 'noreply@roomiesplit.app' },
+        sender: { name: 'Roomie Split', email: 'gopalarao4444@gmail.com' },
         to: [{ email: to }],
         subject,
         htmlContent: html,
