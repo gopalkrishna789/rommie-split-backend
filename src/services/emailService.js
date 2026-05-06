@@ -15,8 +15,11 @@ function getTransporter() {
     port: parseInt(SMTP_PORT || '587', 10),
     secure: parseInt(SMTP_PORT || '587', 10) === 465,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
+    pool: true, // Use connection pooling
+    maxConnections: 5,
+    maxMessages: 100,
   });
-  console.log(`📧 Email service ready (${SMTP_HOST})`);
+  console.log(`📧 Email service ready (${SMTP_USER})`);
   return transporter;
 }
 
@@ -31,15 +34,17 @@ async function sendMail({ to, subject, html }) {
   }
   
   try {
-    await t.sendMail({
+    const info = await t.sendMail({
       from: `"Roomie Split" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
       to,
       subject,
       html,
     });
-    console.log(`📧 Sent to ${to}: ${subject}`);
+    console.log(`📧 ✅ Sent to ${to}: ${subject}`);
+    return info;
   } catch (err) {
-    console.error(`📧 Email error (to: ${to}):`, err.message);
+    console.error(`📧 ❌ Email error (to: ${to}):`, err.message);
+    // Don't throw - just log the error so app continues working
   }
 }
 
