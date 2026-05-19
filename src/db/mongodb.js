@@ -17,16 +17,13 @@ export async function connectMongoDB() {
   try {
     await mongoose.connect(MONGODB_URI, {
       dbName: 'roomie_split',
-      minPoolSize: 2,       // Keep at least 2 connections warm — eliminates cold-start latency
+      minPoolSize: 2,
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 10000,
       socketTimeoutMS: 45000,
-      heartbeatFrequencyMS: 10000, // Ping Atlas every 10s to keep connections alive
-      tls: true,
-      tlsAllowInvalidCertificates: false,
+      heartbeatFrequencyMS: 10000,
       retryWrites: true,
       w: 'majority',
-      compressors: ['zlib'], // Compress wire traffic
     });
 
     isConnected = true;
