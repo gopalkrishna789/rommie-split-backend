@@ -26,8 +26,7 @@ export async function createMember({ roomId, name, upiId, email, qrCodeBase64, c
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, roomId, name, upiId, email || null, qrCodeBase64 || null, color, avatarInitials]
   );
-  const res = await query(`SELECT id, room_id, name, upi_id, email, color, avatar_initials, created_at FROM members WHERE id = ?`, [id]);
-  return res.rows[0];
+  return { id, room_id: roomId, name, upi_id: upiId, email: email || null, color, avatar_initials: avatarInitials, created_at: new Date().toISOString() };
 }
 
 export async function updateMemberTokens({ memberId, fcmToken, pushSubscription }) {

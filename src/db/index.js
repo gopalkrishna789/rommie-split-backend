@@ -1,17 +1,30 @@
 /**
  * Database abstraction layer
+ * - Uses MongoDB when MONGODB_URI is set
  * - Uses SQLite (better-sqlite3) when DATABASE_URL is not set (local dev)
  * - Uses PostgreSQL (pg) when DATABASE_URL is set (production)
  */
 import dotenv from 'dotenv';
 dotenv.config();
 
-const USE_SQLITE = !process.env.DATABASE_URL || process.env.DATABASE_URL.startsWith('sqlite');
+const USE_MONGODB = !!process.env.MONGODB_URI;
+const USE_SQLITE = !USE_MONGODB && (!process.env.DATABASE_URL || process.env.DATABASE_URL.startsWith('sqlite'));
 
 let _query;
 let _getClient;
 
-if (USE_SQLITE) {
+if (USE_MONGODB) {
+  // ── MongoDB adapter ─────────────────────────────────────────────────────
+  console.log('📦 Using MongoDB database');
+  
+  const { connectMongoDB } = await import('./mongodb.js');
+  await connectMongoDB();
+  
+  const mongoAdapter = await import('./mongoAdapter.js');
+  _query = mongoAdapter.query;
+  _getClient = mongoAdapter.getClient;
+
+} else if (USE_SQLITE) {
   // ── SQLite adapter ──────────────────────────────────────────────────────
   const { default: Database } = await import('better-sqlite3');
   const path = await import('path');
@@ -107,6 +120,31 @@ if (USE_SQLITE) {
     );
     CREATE INDEX IF NOT EXISTS idx_activity_room ON activity_log(room_id);
     CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at);
+
+    -- Phase 1: user_rooms — allows one user (email) to belong to multiple rooms
+    CREATE TABLE IF NOT EXISTS user_rooms (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+      email TEXT NOT NULL,
+      room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+      member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+      joined_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(email, room_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_rooms_email ON user_rooms(email);
+    CREATE INDEX IF NOT EXISTS idx_user_rooms_room  ON user_rooms(room_id);
+
+    -- Phase 1: expense_edits — audit trail for expense changes
+    CREATE TABLE IF NOT EXISTS expense_edits (
+      id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6)))),
+      expense_id TEXT NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+      edited_by_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+      edited_by_name TEXT NOT NULL,
+      field_changed TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      edited_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_expense_edits_expense ON expense_edits(expense_id);
   `);
 
   // Add new columns to existing databases (safe — ignored if column already exists)
@@ -124,6 +162,13 @@ if (USE_SQLITE) {
     `ALTER TABLE splits ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'unpaid'`,
     `ALTER TABLE rooms ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE rooms ADD COLUMN max_members INTEGER NOT NULL DEFAULT 10`,
+    // Phase 1: audit trail for expense edits
+    `ALTER TABLE expenses ADD COLUMN edit_history TEXT`,
+    // Phase 1: split type for percentage/exclude modes
+    `ALTER TABLE splits ADD COLUMN split_type TEXT NOT NULL DEFAULT 'equal'`,
+    `ALTER TABLE splits ADD COLUMN split_percent REAL`,
+    // Phase 2: soft delete for expenses
+    `ALTER TABLE expenses ADD COLUMN deleted_at TEXT DEFAULT NULL`,
   ];
   for (const sql of alterStatements) {
     try { 

@@ -2,29 +2,44 @@ import { createSplit, getUnpaidBalanceToSpecificPayer } from '../db/queries/spli
 
 /**
  * Create splits for a new expense.
- * - Payer's split is auto-marked paid=true
- * - Each debtor's split includes their current carry-forward (unpaid balance TO THIS PAYER ONLY)
- * - Supports 'equal' (default) or 'custom' split modes
+ *
+ * Split modes:
+ *  - 'equal'      — divide equally among all members (default)
+ *  - 'custom'     — exact paise amounts per member (customShares map)
+ *  - 'percentage' — percentage per member (customShares map, values 0-100)
+ *  - 'exclude'    — equal split among included members only (customShares: { memberId: true/false })
  *
  * @param {string} expenseId
  * @param {string} payerId
  * @param {number} totalAmount - in paise
  * @param {string[]} memberIds - all member IDs in the room
- * @param {object} [customShares] - { [memberId]: amountPaise } for custom mode
+ * @param {object} [customShares] - depends on splitMode
+ * @param {string} [splitMode] - 'equal' | 'custom' | 'percentage' | 'exclude'
  * @returns {Promise<Array>} created split rows
  */
-export async function createSplits(expenseId, payerId, totalAmount, memberIds, customShares) {
-  const isCustom = customShares && Object.keys(customShares).length > 0;
-  const perShare = isCustom ? null : Math.round(totalAmount / memberIds.length);
-  const splits = [];
+export async function createSplits(expenseId, payerId, totalAmount, memberIds, customShares, splitMode = 'equal') {
+  // Resolve effective split mode
+  const mode = splitMode || (customShares && Object.keys(customShares).length > 0 ? 'custom' : 'equal');
 
-  for (const memberId of memberIds) {
-    const share = isCustom
-      ? (customShares[memberId] || Math.round(totalAmount / memberIds.length))
-      : perShare;
+  // Compute share amounts per member
+  const shareMap = computeShares(totalAmount, memberIds, payerId, customShares, mode);
+
+  // Step 1: Fetch all carry-forward values in parallel (skip payer)
+  const debtorIds = memberIds.filter(id => id !== payerId && shareMap[id] > 0);
+  const carryForwardMap = {};
+
+  await Promise.all(
+    debtorIds.map(async (memberId) => {
+      carryForwardMap[memberId] = await getUnpaidBalanceToSpecificPayer(memberId, payerId);
+    })
+  );
+
+  // Step 2: Create all splits in parallel
+  const splitPromises = memberIds.map((memberId) => {
+    const share = shareMap[memberId] ?? 0;
 
     if (memberId === payerId) {
-      const split = await createSplit({
+      return createSplit({
         expenseId,
         memberId,
         share,
@@ -32,23 +47,79 @@ export async function createSplits(expenseId, payerId, totalAmount, memberIds, c
         paidAt: new Date(),
         carryForward: 0,
       });
-      splits.push(split);
+    } else if (share === 0) {
+      // Excluded member — create a zero-share paid split so they appear in the list
+      return createSplit({
+        expenseId,
+        memberId,
+        share: 0,
+        paid: true,
+        paidAt: new Date(),
+        carryForward: 0,
+      });
     } else {
-      // FIXED: Only include unpaid balance to THIS SPECIFIC PAYER, not total unpaid balance
-      const carryForward = await getUnpaidBalanceToSpecificPayer(memberId, payerId);
-      const split = await createSplit({
+      return createSplit({
         expenseId,
         memberId,
         share,
         paid: false,
         paidAt: null,
-        carryForward,
+        carryForward: carryForwardMap[memberId] || 0,
       });
-      splits.push(split);
+    }
+  });
+
+  return Promise.all(splitPromises);
+}
+
+/**
+ * Compute share amounts for each member based on split mode.
+ * Returns { [memberId]: amountPaise }
+ */
+function computeShares(totalAmount, memberIds, payerId, customShares, mode) {
+  const shareMap = {};
+
+  switch (mode) {
+    case 'equal': {
+      const perShare = Math.round(totalAmount / memberIds.length);
+      memberIds.forEach(id => { shareMap[id] = perShare; });
+      break;
+    }
+
+    case 'custom': {
+      // customShares: { [memberId]: amountPaise }
+      memberIds.forEach(id => {
+        shareMap[id] = customShares?.[id] ?? Math.round(totalAmount / memberIds.length);
+      });
+      break;
+    }
+
+    case 'percentage': {
+      // customShares: { [memberId]: percentage (0-100) }
+      memberIds.forEach(id => {
+        const pct = customShares?.[id] ?? 0;
+        shareMap[id] = Math.round((pct / 100) * totalAmount);
+      });
+      break;
+    }
+
+    case 'exclude': {
+      // customShares: { [memberId]: true (included) | false (excluded) }
+      const includedIds = memberIds.filter(id => customShares?.[id] !== false);
+      const perShare = includedIds.length > 0 ? Math.round(totalAmount / includedIds.length) : 0;
+      memberIds.forEach(id => {
+        shareMap[id] = customShares?.[id] === false ? 0 : perShare;
+      });
+      break;
+    }
+
+    default: {
+      const perShare = Math.round(totalAmount / memberIds.length);
+      memberIds.forEach(id => { shareMap[id] = perShare; });
     }
   }
 
-  return splits;
+  return shareMap;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   getExpense,
   markPaid,
   getBalances,
+  getNetBalances,
   recordPaymentAttempt,
   getPaymentAttempts,
   removeExpense,
@@ -37,8 +38,8 @@ export default async function expenseRoutes(fastify, options) {
           receiptBase64: { type: 'string' },
           isRecurring:   { type: 'boolean' },
           recurringDay:  { type: 'integer', minimum: 1, maximum: 31 },
-          splitMode:     { type: 'string', enum: ['equal', 'custom'] },
-          customShares:  { type: 'object', additionalProperties: { type: 'integer' } },
+          splitMode:     { type: 'string', enum: ['equal', 'custom', 'percentage', 'exclude'] },
+          customShares:  { type: 'object', additionalProperties: { type: ['integer', 'number', 'boolean'] } },
         },
       },
     },
@@ -102,6 +103,7 @@ export default async function expenseRoutes(fastify, options) {
   }, getPaymentAttempts);
 
   fastify.get('/balances', getBalances);
+  fastify.get('/net-balances', getNetBalances);
 
   // Edit expense (payer only)
   fastify.put('/expenses/:id', {
@@ -145,10 +147,14 @@ export default async function expenseRoutes(fastify, options) {
   // Settlement plan
   fastify.get('/settlement-plan', getSettlementPlan);
 
-  // Delete an expense — only when all roommates have paid
+  // Delete an expense — soft delete, with optional force for payer
   fastify.delete('/expenses/:id', {
     schema: {
       params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+      body: {
+        type: 'object',
+        properties: { force: { type: 'boolean' } },
+      },
     },
   }, removeExpense);
 
@@ -212,4 +218,23 @@ export default async function expenseRoutes(fastify, options) {
       params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
     },
   }, sendManualReminder);
+
+  // Get edit history for an expense (audit trail)
+  fastify.get('/expenses/:id/edits', {
+    schema: {
+      params: { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+  }, async (request, reply) => {
+    const { roomId } = request.user;
+    const { id: expenseId } = request.params;
+    const { getExpenseById } = await import('../db/queries/expenses.js');
+    const { query } = await import('../db/index.js');
+    const expense = await getExpenseById(expenseId);
+    if (!expense || expense.room_id !== roomId) return reply.code(404).send({ error: 'Expense not found' });
+    const res = await query(
+      `SELECT * FROM expense_edits WHERE expense_id = ? ORDER BY edited_at ASC`,
+      [expenseId]
+    );
+    return reply.send({ edits: res.rows });
+  });
 }

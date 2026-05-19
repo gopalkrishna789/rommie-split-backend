@@ -11,10 +11,18 @@ export async function createSplit({ expenseId, memberId, share, paid, paidAt, ca
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [id, expenseId, memberId, share, paidInt, paidAtStr, carryForward || 0]
   );
-  const res = await query(`SELECT * FROM splits WHERE id = ?`, [id]);
-  const row = res.rows[0];
-  if (row) row.paid = row.paid === 1 || row.paid === true;
-  return row;
+  // Return constructed object directly — avoids a second SELECT round-trip
+  return {
+    id,
+    expense_id: expenseId,
+    member_id: memberId,
+    share,
+    paid: !!paid,
+    paid_at: paidAtStr,
+    carry_forward: carryForward || 0,
+    status: paid ? 'paid' : 'unpaid',
+    payment_attempts: 0,
+  };
 }
 
 export async function getSplitsByExpense(expenseId) {

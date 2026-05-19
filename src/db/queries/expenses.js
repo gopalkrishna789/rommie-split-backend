@@ -10,8 +10,21 @@ export async function createExpense({ roomId, payerId, purpose, category, notes,
     [id, roomId, payerId, purpose, category || 'other', notes || null, receiptBase64 || null,
      totalAmount, expDate, isRecurring ? 1 : 0, recurringDay || null]
   );
-  const res = await query(`SELECT * FROM expenses WHERE id = ?`, [id]);
-  return res.rows[0];
+  // Return constructed object directly — avoids a second SELECT round-trip
+  return {
+    id,
+    room_id: roomId,
+    payer_id: payerId,
+    purpose,
+    category: category || 'other',
+    notes: notes || null,
+    receipt_base64: receiptBase64 || null,
+    total_amount: totalAmount,
+    date: expDate,
+    is_recurring: isRecurring ? 1 : 0,
+    recurring_day: recurringDay || null,
+    created_at: new Date().toISOString(),
+  };
 }
 
 export async function updateExpense({ expenseId, purpose, category, notes, totalAmount, date }) {
@@ -47,7 +60,7 @@ export async function getExpensesByRoom(roomId, limit = 20, offset = 0) {
     `SELECT e.*, m.name AS payer_name, m.color AS payer_color, m.avatar_initials AS payer_initials
      FROM expenses e
      JOIN members m ON e.payer_id = m.id
-     WHERE e.room_id = ?
+     WHERE e.room_id = ? AND e.deleted_at IS NULL
      ORDER BY e.date DESC, e.created_at DESC
      LIMIT ? OFFSET ?`,
     [roomId, limit, offset]
@@ -62,7 +75,7 @@ export async function getExpenseById(expenseId) {
             m.qr_code_base64 AS payer_qr
      FROM expenses e
      JOIN members m ON e.payer_id = m.id
-     WHERE e.id = ?`,
+     WHERE e.id = ? AND e.deleted_at IS NULL`,
     [expenseId]
   );
   return res.rows[0] || null;
@@ -70,7 +83,7 @@ export async function getExpenseById(expenseId) {
 
 export async function countExpensesByRoom(roomId) {
   const res = await query(
-    `SELECT COUNT(*) AS total FROM expenses WHERE room_id = ?`,
+    `SELECT COUNT(*) AS total FROM expenses WHERE room_id = ? AND deleted_at IS NULL`,
     [roomId]
   );
   return parseInt(res.rows[0].total, 10);
@@ -92,6 +105,14 @@ export async function areAllSplitsPaid(expenseId) {
 }
 
 export async function deleteExpense(expenseId) {
-  // Splits and payment_attempts are deleted via ON DELETE CASCADE
-  await query(`DELETE FROM expenses WHERE id = ?`, [expenseId]);
+  // Soft delete — sets deleted_at timestamp instead of hard DELETE
+  // Splits and payment_attempts remain for audit trail
+  await query(
+    `UPDATE expenses SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [expenseId]
+  );
+}
+
+export async function restoreExpense(expenseId) {
+  await query(`UPDATE expenses SET deleted_at = NULL WHERE id = ?`, [expenseId]);
 }

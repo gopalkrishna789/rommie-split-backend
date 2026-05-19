@@ -19,7 +19,7 @@ import { query } from '../db/index.js';
 
 export async function addExpense(request, reply) {
   const { roomId, memberId: currentMemberId } = request.user;
-  const { payerId, purpose, totalAmount, date, category, notes, customShares, receiptBase64, isRecurring, recurringDay } = request.body;
+  const { payerId, purpose, totalAmount, date, category, notes, customShares, receiptBase64, isRecurring, recurringDay, splitMode } = request.body;
 
   if (!payerId || !purpose || !totalAmount) {
     return reply.code(400).send({ error: 'payerId, purpose, and totalAmount are required' });
@@ -28,19 +28,20 @@ export async function addExpense(request, reply) {
     return reply.code(400).send({ error: 'totalAmount must be positive (in paise)' });
   }
 
-  // Verify payer belongs to this room
-  const payer = await getMemberById(payerId);
+  // Fetch payer and all members in parallel
+  const [payer, members] = await Promise.all([
+    getMemberById(payerId),
+    getMembersByRoom(roomId),
+  ]);
+
   if (!payer || payer.room_id !== roomId) {
     return reply.code(400).send({ error: 'Invalid payer' });
   }
-
-  // Get all members in the room
-  const members = await getMembersByRoom(roomId);
   if (members.length === 0) {
     return reply.code(400).send({ error: 'No members in room' });
   }
 
-  // Create expense
+  // Create expense and splits in parallel where possible
   const expense = await createExpense({
     roomId,
     payerId,
@@ -54,9 +55,12 @@ export async function addExpense(request, reply) {
     recurringDay: recurringDay || null,
   });
 
-  // Create splits for all members
+  // Create splits and fetch room name in parallel
   const memberIds = members.map((m) => m.id);
-  const splits = await createSplits(expense.id, payerId, totalAmount, memberIds, customShares);
+  const [splits, room] = await Promise.all([
+    createSplits(expense.id, payerId, totalAmount, memberIds, customShares, splitMode || 'equal'),
+    getRoomById(roomId).catch(() => null),
+  ]);
 
   // Invalidate Redis balance cache
   await invalidateBalanceCache(roomId);
@@ -92,7 +96,6 @@ export async function addExpense(request, reply) {
   ).catch(console.error);
 
   // Send email notifications to each debtor — skip the payer (non-blocking)
-  const room = await getRoomById(roomId).catch(() => null);
   const roomName = room?.name || 'your room';
   for (const split of splits) {
     // Skip payer's own split (paid=true) and anyone without email
@@ -306,6 +309,7 @@ export async function partialPay(request, reply) {
 /**
  * Edit an expense (payer only, before all splits are paid)
  * If totalAmount changes, unpaid splits are recalculated automatically.
+ * Records an audit trail of all changes.
  */
 export async function editExpense(request, reply) {
   const { roomId, memberId: currentMemberId } = request.user;
@@ -316,6 +320,27 @@ export async function editExpense(request, reply) {
   if (!expense || expense.room_id !== roomId) return reply.code(404).send({ error: 'Expense not found' });
   if (expense.payer_id !== currentMemberId) return reply.code(403).send({ error: 'Only the payer can edit this expense' });
 
+  // Build audit trail — record what changed
+  const edits = [];
+  const { v4: uuidv4 } = await import('uuid');
+  const editorName = expense.payer_name;
+
+  if (purpose && purpose !== expense.purpose) {
+    edits.push({ field: 'purpose', old: expense.purpose, new: purpose });
+  }
+  if (category && category !== expense.category) {
+    edits.push({ field: 'category', old: expense.category, new: category });
+  }
+  if (notes !== undefined && notes !== expense.notes) {
+    edits.push({ field: 'notes', old: expense.notes || '', new: notes || '' });
+  }
+  if (totalAmount && totalAmount !== expense.total_amount) {
+    edits.push({ field: 'totalAmount', old: String(expense.total_amount), new: String(totalAmount) });
+  }
+  if (date && date !== expense.date) {
+    edits.push({ field: 'date', old: expense.date, new: date });
+  }
+
   const updated = await updateExpense({ expenseId, purpose, category, notes, totalAmount, date });
 
   // If the total amount changed, recalculate unpaid splits proportionally
@@ -323,15 +348,27 @@ export async function editExpense(request, reply) {
     await recalculateSplitsForExpense(expenseId, totalAmount);
   }
 
+  // Write audit trail entries
+  for (const edit of edits) {
+    const editId = uuidv4();
+    await query(
+      `INSERT INTO expense_edits (id, expense_id, edited_by_id, edited_by_name, field_changed, old_value, new_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [editId, expenseId, currentMemberId, editorName, edit.field, edit.old, edit.new]
+    ).catch(() => {}); // non-blocking — don't fail the edit if audit fails
+  }
+
   await invalidateBalanceCache(roomId);
   emitToRoom(roomId, 'expense:updated', { expenseId, expense: updated });
 
   logActivity({
     roomId, memberId: currentMemberId, memberName: expense.payer_name,
-    action: 'expense_edited', details: `Edited ${expense.purpose}`, expenseId,
+    action: 'expense_edited',
+    details: `Edited ${expense.purpose}${edits.length ? ` (changed: ${edits.map(e => e.field).join(', ')})` : ''}`,
+    expenseId,
   }).catch(() => {});
 
-  return reply.send({ success: true, expense: updated });
+  return reply.send({ success: true, expense: updated, edits });
 }
 
 /**
@@ -697,31 +734,47 @@ export async function getPaymentAttempts(request, reply) {
 }
 
 /**
- * Delete an expense — only allowed when ALL roommates have paid their share.
- * Only the payer (or any room member) can trigger this.
+ * Delete an expense — soft delete.
+ * - If all splits are paid: any room member can delete.
+ * - If some splits are unpaid: only the payer can force-delete (with `force: true`).
  */
 export async function removeExpense(request, reply) {
   const { roomId, memberId: currentMemberId } = request.user;
   const { id: expenseId } = request.params;
+  const force = request.body?.force === true;
 
   const expense = await getExpenseById(expenseId);
   if (!expense || expense.room_id !== roomId) {
     return reply.code(404).send({ error: 'Expense not found' });
   }
 
-  // Guard: only allow deletion when every roommate has paid
   const allPaid = await areAllSplitsPaid(expenseId);
+
   if (!allPaid) {
-    return reply.code(400).send({ error: 'Cannot delete — some roommates have not paid yet' });
+    if (!force) {
+      // Return info so the frontend can show a stronger confirmation
+      return reply.code(400).send({
+        error: 'Some roommates have not paid yet',
+        canForce: expense.payer_id === currentMemberId,
+        requiresForce: true,
+      });
+    }
+    // Force delete — only the payer can do this
+    if (expense.payer_id !== currentMemberId) {
+      return reply.code(403).send({ error: 'Only the payer can force-delete an expense with unpaid splits' });
+    }
   }
 
   await deleteExpense(expenseId);
-
-  // Invalidate balance cache
   await invalidateBalanceCache(roomId);
-
-  // Notify all room members via socket
   emitToRoom(roomId, 'expense:deleted', { expenseId });
+
+  logActivity({
+    roomId, memberId: currentMemberId, memberName: expense.payer_name,
+    action: 'expense_deleted',
+    details: `Deleted expense: ${expense.purpose}${!allPaid ? ' (force deleted with unpaid splits)' : ''}`,
+    expenseId,
+  }).catch(() => {});
 
   return reply.send({ success: true, expenseId });
 }
@@ -757,4 +810,108 @@ export async function getBalances(request, reply) {
   await setCachedBalances(roomId, balances);
 
   return reply.send({ balances, cached: false });
+}
+
+/**
+ * Net balances — returns per-pair net amounts after mutual debt cancellation.
+ * Example: A paid ₹300 groceries, B paid ₹250 electricity (2 members).
+ *   A owes B ₹125 (B's share of groceries)
+ *   B owes A ₹150 (A's share of electricity) — wait, let's be precise:
+ *   Each person's share = total / 2
+ *   A paid ₹300 → B owes A ₹150
+ *   B paid ₹250 → A owes B ₹125
+ *   Net: B owes A ₹150 - ₹125 = ₹25  (not ₹150 and ₹125 separately)
+ */
+export async function getNetBalances(request, reply) {
+  const { roomId } = request.user;
+
+  const members = await getMembersByRoom(roomId);
+
+  // Get all unpaid splits with payer info
+  const result = await query(`
+    SELECT s.member_id, s.share, s.carry_forward, e.payer_id
+    FROM splits s
+    JOIN expenses e ON s.expense_id = e.id
+    WHERE e.room_id = ? AND s.paid = 0 AND e.payer_id != s.member_id
+  `, [roomId]);
+
+  const unpaidSplits = result.rows;
+
+  // Build gross debt matrix: debtMatrix[debtorId][creditorId] = amount
+  const debtMatrix = {};
+  for (const m of members) {
+    debtMatrix[m.id] = {};
+    for (const m2 of members) {
+      if (m.id !== m2.id) debtMatrix[m.id][m2.id] = 0;
+    }
+  }
+
+  for (const split of unpaidSplits) {
+    const debtor = split.member_id;
+    const creditor = split.payer_id;
+    const amount = (split.share || 0) + (split.carry_forward || 0);
+    if (debtMatrix[debtor] && debtMatrix[debtor][creditor] !== undefined) {
+      debtMatrix[debtor][creditor] += amount;
+    }
+  }
+
+  // Net out mutual debts between each pair
+  // netPairs: array of { fromId, toId, amount } where amount > 0
+  const netPairs = [];
+  const processed = new Set();
+
+  for (const m1 of members) {
+    for (const m2 of members) {
+      if (m1.id >= m2.id) continue; // process each pair once
+      const pairKey = `${m1.id}:${m2.id}`;
+      if (processed.has(pairKey)) continue;
+      processed.add(pairKey);
+
+      const m1OwesM2 = debtMatrix[m1.id]?.[m2.id] || 0;
+      const m2OwesM1 = debtMatrix[m2.id]?.[m1.id] || 0;
+      const net = m1OwesM2 - m2OwesM1;
+
+      if (net > 0) {
+        netPairs.push({ fromId: m1.id, toId: m2.id, amount: net });
+      } else if (net < 0) {
+        netPairs.push({ fromId: m2.id, toId: m1.id, amount: -net });
+      }
+      // net === 0 means fully offset — no payment needed
+    }
+  }
+
+  // Build per-member net summary (net of all pairs)
+  const memberMap = Object.fromEntries(members.map(m => [m.id, m]));
+  const summary = members.map(member => {
+    const youOweOthers = netPairs
+      .filter(p => p.fromId === member.id)
+      .reduce((s, p) => s + p.amount, 0);
+    const othersOweYou = netPairs
+      .filter(p => p.toId === member.id)
+      .reduce((s, p) => s + p.amount, 0);
+
+    return {
+      memberId:       member.id,
+      memberName:     member.name,
+      color:          member.color,
+      avatarInitials: member.avatar_initials,
+      totalOwed:      youOweOthers,
+      totalOwedTo:    othersOweYou,
+      netBalance:     othersOweYou - youOweOthers,
+    };
+  });
+
+  // Enrich netPairs with member info
+  const enrichedPairs = netPairs.map(p => ({
+    ...p,
+    fromName:     memberMap[p.fromId]?.name,
+    fromColor:    memberMap[p.fromId]?.color,
+    fromInitials: memberMap[p.fromId]?.avatar_initials,
+    toName:       memberMap[p.toId]?.name,
+    toColor:      memberMap[p.toId]?.color,
+    toInitials:   memberMap[p.toId]?.avatar_initials,
+    toUpiId:      memberMap[p.toId]?.upi_id,
+  }));
+
+  return reply.send({ balances: summary, netPairs: enrichedPairs });
 }

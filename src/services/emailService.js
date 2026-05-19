@@ -854,3 +854,48 @@ export async function sendWelcomeEmail({
     html: emailWrapper(content),
   });
 }
+
+// ── Password Reset Email ──────────────────────────────────────────────────
+export async function sendPasswordResetEmail({ toEmail, toName, resetUrl }) {
+  if (!toEmail) return;
+
+  const content = `
+    <p style="margin:0 0 6px;font-size:16px;font-weight:700;color:#111827;">Hi ${toName},</p>
+    <p style="margin:0 0 28px;font-size:14px;color:#6b7280;line-height:1.6;">
+      We received a request to reset your Roomie Split password. Click the button below to set a new one.
+    </p>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#f8f7ff;border:1.5px solid #e0e7ff;border-radius:16px;margin-bottom:28px;">
+      <tr>
+        <td style="padding:28px 24px;text-align:center;">
+          <div style="font-size:40px;margin-bottom:12px;">🔐</div>
+          <p style="margin:0 0 20px;font-size:14px;color:#374151;">
+            This link expires in <strong>1 hour</strong>.
+          </p>
+          <a href="${resetUrl}"
+            style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:12px;font-size:15px;font-weight:700;letter-spacing:0.2px;">
+            Reset My Password
+          </a>
+        </td>
+      </tr>
+    </table>
+
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
+      style="background:#fef2f2;border:1px solid #fecaca;border-radius:12px;">
+      <tr>
+        <td style="padding:14px 18px;">
+          <p style="margin:0;font-size:13px;color:#991b1b;line-height:1.5;">
+            <strong>Didn't request this?</strong> You can safely ignore this email — your password won't change.
+          </p>
+        </td>
+      </tr>
+    </table>
+  `;
+
+  await sendMail({
+    to: toEmail,
+    subject: `[Roomie Split] Reset your password`,
+    html: emailWrapper(content),
+  });
+}

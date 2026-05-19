@@ -248,6 +248,20 @@ async function start() {
     // Start background scheduler
     startScheduler();
 
+    // Keep-alive ping — prevents Render.com free tier from spinning down
+    // Pings the health endpoint every 14 minutes (Render spins down after 15 min idle)
+    if (process.env.NODE_ENV === 'production' && process.env.BACKEND_URL) {
+      const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes
+      setInterval(async () => {
+        try {
+          await fetch(`${process.env.BACKEND_URL}/health`);
+          console.log('🏓 Keep-alive ping sent');
+        } catch (err) {
+          console.warn('Keep-alive ping failed:', err.message);
+        }
+      }, PING_INTERVAL);
+    }
+
     console.log(`\n🚀 Roomie Split server running!`);
     console.log(`   API:      http://localhost:${PORT}/api`);
     console.log(`   Health:   http://localhost:${PORT}/health`);
