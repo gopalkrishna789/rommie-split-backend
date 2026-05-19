@@ -21,4 +21,12 @@ expenseSchema.index({ payer_id: 1 });
 expenseSchema.index({ date: -1 });
 expenseSchema.index({ deleted_at: 1 });
 
+// Drop stale 'id' index if it exists (created by old mongoAdapter code)
+expenseSchema.statics.dropStaleIndexes = async function () {
+  try {
+    await this.collection.dropIndex('id_1');
+    console.log('✅ Dropped stale id_1 index from expenses');
+  } catch (e) { /* index doesn't exist — fine */ }
+};
+
 export default mongoose.model('Expense', expenseSchema);

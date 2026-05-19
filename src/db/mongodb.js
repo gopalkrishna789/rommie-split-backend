@@ -29,6 +29,14 @@ export async function connectMongoDB() {
     isConnected = true;
     console.log('📦 Connected to MongoDB');
 
+    // Drop stale indexes left by old mongoAdapter code
+    try {
+      const ExpenseMod = await import('./models/Expense.js');
+      const SplitMod   = await import('./models/Split.js');
+      await ExpenseMod.default.dropStaleIndexes();
+      await SplitMod.default.dropStaleIndexes();
+    } catch (e) { /* non-critical */ }
+
     // Handle connection events
     mongoose.connection.on('error', (err) => {
       console.error('MongoDB connection error:', err);

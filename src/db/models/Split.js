@@ -19,4 +19,12 @@ splitSchema.index({ expense_id: 1 });
 splitSchema.index({ paid: 1 });
 splitSchema.index({ payment_status: 1 });
 
+// Drop stale 'id' index if it exists
+splitSchema.statics.dropStaleIndexes = async function () {
+  try {
+    await this.collection.dropIndex('id_1');
+    console.log('✅ Dropped stale id_1 index from splits');
+  } catch (e) { /* fine */ }
+};
+
 export default mongoose.model('Split', splitSchema);
